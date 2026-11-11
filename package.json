@@ -1,0 +1,17 @@
+{
+  "name": "portfolio-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local, read-only, multi-chain portfolio tracker with live prices and cost basis.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "start": "node --experimental-sqlite --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server.js",
+    "dev": "node --watch --experimental-sqlite --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server.js",
+    "test": "node --experimental-sqlite --test"
+  },
+  "dependencies": {}
+}

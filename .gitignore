@@ -1,0 +1,7 @@
+node_modules/
+# Private: never commit your accounts, keys or data
+accounts.seed.json
+.env
+data/
+*.db
+*.db-*

@@ -1,0 +1,9 @@
+{
+  "note": "Optional. Copy to accounts.seed.json (gitignored) to import accounts on first run. You can also add everything from the app instead.",
+  "accounts": [
+    { "label": "Main wallet", "type": "evm", "address": "0x0000000000000000000000000000000000000000" },
+    { "label": "Layer 2 wallet", "type": "evm", "address": "0x0000000000000000000000000000000000000000", "chains": ["base", "arbitrum"] },
+    { "label": "Solana wallet", "type": "solana", "address": "11111111111111111111111111111111" },
+    { "label": "Kraken", "type": "cex", "exchange": "kraken", "apiKey": "read-only key", "secret": "read-only secret" }
+  ]
+}
