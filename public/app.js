@@ -1251,7 +1251,7 @@ function accountDetail(a) {
     <td class="hm">${h.chain ? `<span class="pill">${esc(clip(chainName(h.chain), 16))}</span>` : ''}${holdingNote(h)}</td><td>${qty(h.qty)}</td><td class="hm">${priceH(h.price)}</td><td>${money(h.value)}</td></tr>`).join('');
   const body = a.hs.length
     ? `<table><thead><tr><th>Asset</th><th class="hm">Chain</th><th>Amount</th><th class="hm">Price</th><th>Value</th></tr></thead><tbody>${rows}</tbody></table>`
-    : `<div class="acc-none">${a.enabled ? 'No balances found for this account yet. A first sync can take a minute.' : 'This account is disabled, so it is not synced or counted.'}</div>`;
+    : `<div class="acc-none">${a.enabled ? 'No balances found for this account yet. A first sync can take a minute.' : 'This account is disabled, so it is not synced or counted. Transfers between it and your other accounts still count as internal moves.'}</div>`;
   return `<div class="acc-detail">${fails ? `<div class="acc-fails">${fails}</div>` : ''}${body}</div>`;
 }
 
@@ -1556,24 +1556,41 @@ function renderKeys(force) {
   const st = ST.data.settings || {};
   const r = st.refresh || {};
   box.dataset.ready = '1';
-  const own = Array.isArray(st.otherOwnAddresses) ? st.otherOwnAddresses : [];
+  const rpcs = Array.isArray(st.rpcs) ? st.rpcs : [];
+  const custom = rpcs.filter((c) => !c.isDefault).length;
   box.innerHTML = `
+    <form id="rpcForm" class="form" novalidate autocomplete="off">
+      <div class="fields">
+        <div class="span2"><label>Public RPC endpoints <span class="dim">(free · tried in order)</span></label>
+          <p class="note tight">Balances are read from these first, so Blockscout and Alchemy are only needed to find new tokens and read history. A public RPC cannot do those two jobs itself. One URL per line; clear a box to switch RPC reads off for that chain. ${custom ? 'Custom endpoints are shown without their path, as it usually contains a key.' : ''}</p></div>
+        <div class="end"><button type="submit">Save endpoints</button>${custom ? ' <button type="button" id="rpcClear">Use defaults</button>' : ''}</div>
+      </div>
+      <details class="adv"${custom ? ' open' : ''}>
+        <summary>${rpcs.length} chains · ${custom ? custom + ' customised' : 'all on defaults'}</summary>
+        <div class="fields rpcs">
+          ${rpcs.map((c) => `<div><label for="rpc_${esc(c.name)}">${esc(c.name)}${c.isDefault ? '' : ' <span class="dim">(custom)</span>'}${c.scanned ? '' : ' <span class="dim">(opt-in chain)</span>'}</label>
+            <textarea id="rpc_${esc(c.name)}" name="rpc:${esc(c.name)}" rows="${Math.max(3, c.urls.length)}" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="no endpoints: RPC reads are off">${esc(c.urls.join('\n'))}</textarea></div>`).join('')}
+        </div>
+        <p class="note tight">Solana has no second free endpoint that serves token accounts and history, so it has one default. A private Solana endpoint added above it makes Solana sync faster.</p>
+      </details>
+      <div class="form-err" id="rpcErr" role="alert"></div>
+    </form>
     <form id="bsForm" class="form" novalidate autocomplete="off">
       <div class="fields">
-        <div class="span2"><label for="f_bs">Blockscout API key <span class="dim">(free · needed for Base, Arbitrum and Robinhood Chain)</span></label>
+        <div class="span2"><label for="f_bs">Blockscout API key <span class="dim">(free)</span></label>
           <input id="f_bs" name="blockscoutKey" type="password" autocomplete="off" spellcheck="false" placeholder="${st.blockscoutKey ? 'key saved (' + esc(st.blockscoutKey) + ') · paste a new one to replace' : 'proapi_…'}"></div>
         <div class="end"><button type="submit">Save key</button></div>
       </div>
-      <p class="note tight">${st.blockscoutKey ? 'A key is saved. ' : '<b class="warn">No key yet.</b> '}Some chain explorers only answer requests that carry an API key. Create a free one at dev.blockscout.com and paste it here: one key covers every EVM chain. It is stored only in the local database on this machine.</p>
+      <p class="note tight">${st.blockscoutKey ? 'A key is saved. ' : '<b class="warn">No key yet.</b> '}Blockscout finds which tokens each EVM wallet holds and reads its transfer history. Create a free key at dev.blockscout.com: one key covers every chain on its free plan. Stored only in the local database on this machine.</p>
       <div class="form-err" id="bsErr" role="alert"></div>
     </form>
     <form id="alForm" class="form" novalidate autocomplete="off">
       <div class="fields">
-        <div class="span2"><label for="f_al">Alchemy API key <span class="dim">(needed for Base · fallback elsewhere)</span></label>
+        <div class="span2"><label for="f_al">Alchemy API key <span class="dim">(paid per request · last resort)</span></label>
           <input id="f_al" name="alchemyKey" type="password" autocomplete="off" spellcheck="false" placeholder="${st.alchemyKey ? 'key saved (' + esc(st.alchemyKey) + ') · paste a new one to replace' : 'paste your Alchemy API key'}"></div>
         <div class="end"><button type="submit">Save key</button></div>
       </div>
-      <p class="note tight">${st.alchemyKey ? 'A key is saved. ' : '<b class="warn">No key yet.</b> '}Blockscout (free) is used wherever it works. Alchemy is only called for Base, which Blockscout's free plan does not cover, and as a fallback when a wallet's history cannot be read from Blockscout. To keep request counts low, Alchemy balances refresh every 10 minutes and history hourly. Enable the networks you want in your Alchemy app and paste its API key here. Stored only in the local database on this machine.</p>
+      <p class="note tight">${st.alchemyKey ? 'A key is saved. ' : '<b class="warn">No key yet.</b> '}Alchemy does Blockscout's job where Blockscout cannot: on Base, which is not on Blockscout's free plan, and on other chains when Blockscout is down or out of credits. While public RPCs are answering it is only called after a balance has moved, plus a slow safety check, to keep the bill low. Enable the networks you want in your Alchemy app and paste its API key here. Stored only in the local database on this machine.</p>
       <div class="form-err" id="alErr" role="alert"></div>
     </form>
     <form id="histForm" class="form" novalidate autocomplete="off">
@@ -1582,24 +1599,6 @@ function renderKeys(force) {
         <div class="end"><button type="submit" id="histReset">Reset chart history</button></div>
       </div>
       <div class="form-err" id="histErr" role="alert"></div>
-    </form>
-    <form id="rpcForm" class="form" novalidate autocomplete="off">
-      <div class="fields">
-        <div class="span2"><label for="f_rpc">Custom Solana RPC URL <span class="dim">(optional)</span></label>
-          <input id="f_rpc" name="solanaRpc" type="url" autocomplete="off" spellcheck="false" placeholder="${st.solanaRpc ? 'custom RPC saved · paste a new URL to replace' : 'https://… (default: public mainnet RPC)'}"></div>
-        <div class="end"><button type="submit">Save RPC</button>${st.solanaRpc ? ' <button type="button" id="rpcClear">Use default</button>' : ''}</div>
-      </div>
-      <p class="note tight">Not required. The public Solana RPC is slow and rate-limited; a private endpoint makes Solana balances and history sync faster. ${st.solanaRpc ? 'A custom endpoint is saved (not shown, as these URLs usually contain an API key).' : ''}</p>
-      <div class="form-err" id="rpcErr" role="alert"></div>
-    </form>
-    <form id="ownForm" class="form" novalidate autocomplete="off">
-      <div class="fields">
-        <div class="span2"><label for="f_own">Other addresses you own <span class="dim">(one per line)</span></label>
-          <textarea id="f_own" name="own" rows="${Math.min(8, Math.max(3, own.length + 1))}" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="0x…">${esc(own.join('\n'))}</textarea></div>
-        <div class="end"><button type="submit">Save addresses</button></div>
-      </div>
-      <p class="note tight">Transfers to or from these addresses are treated as internal moves between your own wallets: they keep their cost basis instead of counting as a deposit or a withdrawal. Useful for old wallets or cold storage you do not track here. Accounts you track are already included.</p>
-      <div class="form-err" id="ownErr" role="alert"></div>
     </form>
     <form id="refForm" class="form" novalidate autocomplete="off">
       <div class="fields four">
@@ -1693,7 +1692,10 @@ const settings = {
       const copy = e.target.closest('[data-copy]');
       if (copy) { copyText(copy.dataset.copy); return; }
       if (e.target.closest('#rpcClear')) {
-        try { await api('/api/settings', 'POST', { solanaRpc: '' }); toast('Using the default Solana RPC'); await loadAccounts(); renderKeys(true); } catch (ex) { toast(`Could not save: ${ex.message}`, 'err'); }
+        try {
+          await api('/api/settings', 'POST', { rpcs: Object.fromEntries((ST.data?.settings?.rpcs || []).map((c) => [c.name, null])) });
+          toast('Using the default RPC endpoints'); await loadAccounts(); renderKeys(true);
+        } catch (ex) { toast(`Could not save: ${ex.message}`, 'err'); }
         return;
       }
     });
@@ -1702,20 +1704,7 @@ const settings = {
       const form = e.target;
       const btn = $('button[type=submit]', form);
       if (btn.disabled) return;
-      if (form.id === 'ownForm') {
-        const err = $('#ownErr');
-        err.textContent = '';
-        const lines = [...new Set(form.elements.own.value.split(/[\n,;]+/).map((x) => x.trim()).filter(Boolean))];
-        const bad = lines.find((x) => !(/^0x[0-9a-fA-F]{40}$/.test(x) || /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(x) || /^prl1[0-9a-z]{20,90}$/.test(x)));
-        if (bad) { err.textContent = `“${clip(bad, 50)}” does not look like a wallet address (0x…, Solana or prl1…).`; form.elements.own.focus(); return; }
-        btn.disabled = true;
-        try {
-          await api('/api/settings', 'POST', { otherOwnAddresses: lines.map((x) => (x.startsWith('0x') ? x.toLowerCase() : x)) });
-          toast('Addresses saved. History is being reclassified');
-          await loadAccounts();
-          renderKeys(true);
-        } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
-      } else if (form.id === 'bsForm') {
+      if (form.id === 'bsForm') {
         const err = $('#bsErr');
         err.textContent = '';
         const key = form.elements.blockscoutKey.value.trim();
@@ -1738,11 +1727,15 @@ const settings = {
       } else if (form.id === 'rpcForm') {
         const err = $('#rpcErr');
         err.textContent = '';
-        const url = form.elements.solanaRpc.value.trim();
-        if (!url) { err.textContent = 'Paste an RPC URL first.'; return; }
-        if (!/^https?:\/\/\S+$/i.test(url)) { err.textContent = 'The RPC URL must start with https://'; form.elements.solanaRpc.focus(); return; }
+        const rpcs = {};
+        for (const t of form.querySelectorAll('textarea')) {
+          const lines = t.value.split(/[\n,]+/).map((x) => x.trim()).filter(Boolean);
+          const bad = lines.find((x) => !/^https:\/\/\S+$/i.test(x));
+          if (bad) { err.textContent = `“${clip(bad, 50)}” must be a URL starting with https://`; t.closest('details').open = true; t.focus(); return; }
+          rpcs[t.name.slice(4)] = lines;
+        }
         btn.disabled = true;
-        try { await api('/api/settings', 'POST', { solanaRpc: url }); toast('Solana RPC saved'); await loadAccounts(); renderKeys(true); } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+        try { await api('/api/settings', 'POST', { rpcs }); toast('RPC endpoints saved'); await loadAccounts(); renderKeys(true); } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
       } else if (form.id === 'refForm') {
         const min = { pricesSeconds: 5, hyperliquidSeconds: 5, balancesSeconds: 30, historyMinutes: 1 };
         const refresh = { ...(ST.data?.settings?.refresh || {}) };

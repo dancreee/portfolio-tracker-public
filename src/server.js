@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ROOT, loadConfig } from './config.js';
-import { autoChains } from './chains.js';
-import { openDb, kvSet, setStatus } from './db.js';
+import { autoChains, DEFAULT_RPCS, cleanRpcs } from './chains.js';
+import { openDb, kvGet, kvSet, setStatus } from './db.js';
 import { log, nowSec } from './util.js';
 import { syncEvmBalances, syncEvmHistory, evmForce } from './sources/evm.js';
 import { refreshHlMarket, syncHlAccount, syncHlHistory } from './sources/hyperliquid.js';
@@ -160,6 +160,36 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('end', () => { try { resolve(s ? JSON.parse(s) : {}); } catch (e) { reject(e); } });
 });
 const mask = (s) => (s ? `${s.slice(0, 4)}…${s.slice(-4)}` : '');
+
+// RPC endpoints per chain, for Settings. Custom URLs often carry an API key in the path or query,
+// so those are shown as "https://host/…"; a line sent back in that form keeps the stored URL.
+const KNOWN_RPCS = new Set(Object.values(DEFAULT_RPCS).flat());
+const maskRpc = (u) => {
+  if (KNOWN_RPCS.has(u)) return u;
+  try { const x = new URL(u); return x.pathname.length > 12 || x.search ? `${x.origin}/…` : u; } catch { return u; }
+};
+const effectiveRpcs = (name) => (name === 'solana' ? cfg.solanaRpcs : cfg.chains[name]?.rpcs) || [];
+const rpcSettings = () => ['solana', ...Object.keys(cfg.chains)].filter((n) => n === 'solana' || cfg.chains[n].chainId).map((name) => {
+  const urls = effectiveRpcs(name);
+  const defaults = DEFAULT_RPCS[name] || [];
+  return { name, urls: urls.map(maskRpc), defaults, isDefault: urls.join('\n') === defaults.join('\n'), scanned: name === 'solana' || autoChains(cfg.chains).includes(name) };
+});
+function saveRpcs(input) {
+  const stored = { ...(cfg.settings.rpcs || {}) };
+  for (const [name, lines] of Object.entries(input)) {
+    if (name !== 'solana' && !cfg.chains[name]) continue;
+    if (lines == null) { delete stored[name]; if (name === 'solana') kvSet(db, 'setting:solanaRpc', null); continue; } // back to defaults
+    if (!Array.isArray(lines)) throw new Error('RPC endpoints must be a list of URLs');
+    const current = effectiveRpcs(name);
+    const urls = cleanRpcs(lines.map((l) => (String(l).trim().endsWith('…') ? current.find((u) => maskRpc(u) === String(l).trim()) || '' : l)));
+    const bad = lines.map((l) => String(l).trim()).find((l) => l && !l.endsWith('…') && !/^https:\/\/\S+$/i.test(l));
+    if (bad) throw new Error(`"${bad.slice(0, 60)}" is not an https:// URL`);
+    if (name === 'solana') kvSet(db, 'setting:solanaRpc', null); // the older single field is folded into the list
+    if (urls.join('\n') === (DEFAULT_RPCS[name] || []).join('\n')) delete stored[name];
+    else stored[name] = urls;
+  }
+  kvSet(db, 'setting:rpcs', stored);
+}
 const publicAccount = (a) => ({
   id: a.id, label: a.label, type: a.type, address: a.address, chains: a.chains ? JSON.parse(a.chains) : null, exchange: a.exchange,
   apiKey: mask(a.api_key), hasSecret: !!a.secret, extra: a.extra ? JSON.parse(a.extra) : null, enabled: !!a.enabled,
@@ -239,7 +269,7 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/accounts' && req.method === 'GET') {
       return send(res, 200, { accounts: db.prepare('SELECT * FROM accounts ORDER BY sort, label').all().map(publicAccount),
-        chains: Object.values(cfg.chains).map((c) => ({ name: c.name, default: autoChains(cfg.chains).includes(c.name) })), settings: { blockscoutKey: mask(cfg.settings.blockscoutKey), alchemyKey: mask(cfg.settings.alchemyKey), refresh: cfg.refresh, solanaRpc: cfg.settings.solanaRpc ? 'custom' : '', otherOwnAddresses: cfg.settings.otherOwnAddresses || [] } });
+        chains: Object.values(cfg.chains).map((c) => ({ name: c.name, default: autoChains(cfg.chains).includes(c.name) })), settings: { blockscoutKey: mask(cfg.settings.blockscoutKey), alchemyKey: mask(cfg.settings.alchemyKey), refresh: cfg.refresh, rpcs: rpcSettings() } });
     }
     if (p === '/api/accounts' && req.method === 'POST') {
       const id = saveAccount(await readBody(req));
@@ -260,10 +290,9 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (typeof b.blockscoutKey === 'string' && b.blockscoutKey.trim()) kvSet(db, 'setting:blockscoutKey', b.blockscoutKey.trim());
       if (typeof b.alchemyKey === 'string' && b.alchemyKey.trim()) kvSet(db, 'setting:alchemyKey', b.alchemyKey.trim());
-      if (typeof b.solanaRpc === 'string') kvSet(db, 'setting:solanaRpc', b.solanaRpc.trim() || null);
+      if (b.rpcs && typeof b.rpcs === 'object') saveRpcs(b.rpcs);
       if (b.refresh) kvSet(db, 'setting:refresh', b.refresh);
       if (b.aliases) kvSet(db, 'setting:aliases', b.aliases);
-      if (Array.isArray(b.otherOwnAddresses)) kvSet(db, 'setting:otherOwnAddresses', b.otherOwnAddresses);
       reloadConfig();
       return send(res, 200, { ok: true });
     }
@@ -302,6 +331,24 @@ function importSeed() {
   } catch (e) { log.warn('seed import failed', e.message); }
 }
 importSeed();
+
+// The old "other addresses you own" setting became disabled accounts: still yours, just not tracked.
+function migrateOwnAddresses() {
+  const list = kvGet(db, 'setting:otherOwnAddresses', null);
+  if (!Array.isArray(list)) return;
+  const have = new Set(db.prepare('SELECT address FROM accounts WHERE address IS NOT NULL').all().map((a) => a.address.toLowerCase()));
+  let n = 0;
+  for (const raw of list) {
+    const address = String(raw || '').trim();
+    if (!address || have.has(address.toLowerCase())) continue;
+    const type = address.startsWith('0x') ? 'evm' : address.startsWith('prl1') ? 'pearl' : 'solana';
+    try { saveAccount({ label: `Own wallet ${address.slice(0, 6)}…${address.slice(-4)} (not tracked)`, type, address, enabled: false }); n++; } catch (e) { log.warn(`own address skipped: ${e.message}`); }
+  }
+  db.prepare("DELETE FROM kv WHERE k = 'setting:otherOwnAddresses'").run();
+  cfg = loadConfig(db);
+  if (n) log.info(`Moved ${n} "other own addresses" into disabled accounts`);
+}
+migrateOwnAddresses();
 
 server.listen(PORT, HOST, () => {
   log.info(`Portfolio tracker running at http://${HOST === '127.0.0.1' ? 'localhost' : HOST}:${PORT} (${cfg.accounts.length} accounts)`);

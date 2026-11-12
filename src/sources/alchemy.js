@@ -87,13 +87,19 @@ export async function syncAlchemyBalances(db, cfg, account, chain) {
     const meta = await resolveTokens(db, chain, [...raw.keys()]);
     for (const [addr, v] of raw) {
       const m = meta.get(addr);
-      if (m) rows.push({ asset: tokenKey(chain, addr), qty: fromUnits(v, m.decimals) });
+      if (!m) continue;
+      let qty = fromUnits(v, m.decimals);
+      const mult = kvGet(db, `ui-mult:${tokenKey(chain, addr)}`, null); // share tokens (tokenized stocks) after splits
+      if (mult && mult !== '1000000000000000000') qty *= fromUnits(mult, 18);
+      rows.push({ asset: tokenKey(chain, addr), qty });
     }
     replaceBalances(db, account.id, `${chain.name}:`, rows);
     setStatus(db, src, true, `${rows.filter((r) => r.qty).length} assets (${raw.size - (rows.length - 1)} unpriced tokens ignored)`);
+    return true;
   } catch (e) {
     setStatus(db, src, false, e.message);
     log.warn(src, e.message);
+    return false;
   }
 }
 

@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { resolveChains } from './chains.js';
+import { resolveChains, rpcsFor } from './chains.js';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -15,7 +15,8 @@ export const DEFAULT_ALIASES = {
 
 // Accounts and settings live in the local SQLite database and are edited from the Settings page.
 export function loadConfig(db) {
-  const accounts = db.prepare('SELECT * FROM accounts WHERE enabled = 1 ORDER BY sort, label').all().map((a) => ({
+  const all = db.prepare('SELECT * FROM accounts ORDER BY sort, label').all();
+  const accounts = all.filter((a) => a.enabled).map((a) => ({
     ...a,
     address: a.address ? (a.type === 'evm' ? a.address.toLowerCase() : a.address) : null,
     chains: a.chains ? JSON.parse(a.chains) : null,
@@ -27,13 +28,14 @@ export function loadConfig(db) {
   return {
     accounts,
     aliases,
-    chains: resolveChains(settings.chains || {}, settings.blockscoutKey || process.env.BLOCKSCOUT_API_KEY || '', settings.alchemyKey || process.env.ALCHEMY_API_KEY || ''),
+    chains: resolveChains(settings.chains || {}, settings.blockscoutKey || process.env.BLOCKSCOUT_API_KEY || '', settings.alchemyKey || process.env.ALCHEMY_API_KEY || '', settings.rpcs || {}),
     stables: new Set([...STABLES, ...(settings.stables || []).map((s) => s.toUpperCase())]),
-    refresh: { pricesSeconds: 15, hyperliquidSeconds: 10, balancesSeconds: 60, historyMinutes: 5, snapshotMinutes: 5, evmBalancesSeconds: 300, evmEmptyMinutes: 60, evmHistoryMinutes: 30, evmEmptyHistoryHours: 6, alchemyBalancesMinutes: 10, alchemyHistoryMinutes: 60, ...(settings.refresh || {}) },
-    ownAddresses: new Set([
-      ...accounts.filter((a) => a.address).map((a) => a.address.toLowerCase()),
-      ...(settings.otherOwnAddresses || []).map((a) => a.toLowerCase()),
-    ]),
+    refresh: { pricesSeconds: 15, hyperliquidSeconds: 10, balancesSeconds: 60, historyMinutes: 5, snapshotMinutes: 5, evmBalancesSeconds: 300, evmEmptyMinutes: 60, evmHistoryMinutes: 30, evmEmptyHistoryHours: 6, alchemyBalancesMinutes: 10, alchemyHistoryMinutes: 60, rpcDiscoveryMinutes: 120, rpcEmptyDiscoveryHours: 12, rpcHistoryHours: 6, ...(settings.refresh || {}) },
+    // Every account counts as yours, including disabled ones (wallets you own but do not track):
+    // moves between them are internal and keep their cost basis.
+    ownAddresses: new Set(all.filter((a) => a.address).map((a) => a.address.toLowerCase())),
+    // The older single custom Solana endpoint, if saved, stays first in line.
+    solanaRpcs: [...new Set([...(settings.solanaRpc && !Array.isArray(settings.rpcs?.solana) ? [settings.solanaRpc] : []), ...rpcsFor('solana', settings.rpcs)])],
     settings,
   };
 }

@@ -39,9 +39,13 @@ Solana, Pearl and centralised exchanges, with cost basis and full buy/sell histo
      chain explorers refuse requests without one.
    - **Alchemy API key**. Only used as a fallback where Blockscout's free plan has no coverage
      (Base, for example), and throttled to keep usage low.
-   - **Solana RPC URL**. The public RPC works but is slow and rate-limited.
-   - **Other addresses you own**, such as old wallets, so transfers to and from them are treated
-     as internal rather than as deposits and withdrawals.
+   - **Public RPC endpoints**. Balances are read from free public RPCs first, three per chain by
+     default. You can replace them per chain, for example with a private Solana endpoint, since
+     the public Solana RPC is slow and rate-limited.
+
+   Wallets you own but do not want tracked, such as old wallets, can be added as accounts and
+   then disabled. Transfers to and from them are then treated as internal rather than as deposits
+   and withdrawals.
 
 Balances appear within a minute. Full history, and therefore cost basis, can take a few minutes on
 the first run for wallets with many transactions.
@@ -64,7 +68,7 @@ opening a block explorer. Nothing else leaves your machine.
 
 | Source | How | Key needed |
 | --- | --- | --- |
-| EVM wallets (Ethereum, Base, Arbitrum, Optimism, Robinhood Chain, Polygon, more) | Blockscout REST API, Alchemy as fallback | free Blockscout key recommended |
+| EVM wallets (Ethereum, Base, Arbitrum, Optimism, Robinhood Chain, Polygon, more) | Public RPCs for balances (free, editable in Settings), then Blockscout REST API for token discovery and history, then Alchemy as a last resort | free Blockscout key recommended |
 | Hyperliquid (spot, staking, perps, fills) | Hyperliquid info API, checked for every EVM wallet | no |
 | Solana wallets | Solana JSON-RPC | no |
 | Pearl wallets | Pearl explorer | no |
@@ -120,7 +124,7 @@ you browse to. **Do not expose the port to the public internet: there is no logi
 - **A chain shows as failing**: add a Blockscout API key in Settings. The sidebar lists which
   sources are failing and why.
 - **Cost basis shows as partly known**: history has not finished syncing, or funds came from a
-  wallet the app does not know about. Add that wallet as an account or under "other addresses you own".
+  wallet the app does not know about. Add that wallet as an account (disable it if you do not want it tracked).
 - **Exchange errors**: check the key is read-only and has permission to query balances, trades and
   ledger/deposit history.
 

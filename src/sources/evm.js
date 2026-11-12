@@ -1,9 +1,14 @@
-// EVM wallets via Blockscout's REST API (v2).
+// EVM wallets. Three sources, cheapest first:
+//   1. public RPCs (free): balances of tokens the wallet is already known to hold, every round
+//   2. Blockscout (free credits): which tokens a wallet holds, and its transfer history
+//   3. Alchemy (paid per request): the same two jobs where Blockscout cannot serve them
+// While the RPC read works, 2 and 3 run on a slow safety clock, and at their usual pace only after a balance moved.
 // Blockscout lists every token an address holds (including new standards such as the
 // ERC-8056 tokenized stocks on Robinhood Chain), so new assets show up on their own.
 import { fetchJson, fromUnits, num, log, nowSec } from '../util.js';
 import { autoChains } from '../chains.js';
 import { syncAlchemyBalances, syncAlchemyHistory } from './alchemy.js';
+import { syncRpcBalances } from './rpc.js';
 import { upsertAsset, replaceBalances, insertEvents, kvGet, kvSet, setStatus } from '../db.js';
 
 const NFT_TYPES = new Set(['ERC-721', 'ERC-1155', 'ERC-404']);
@@ -102,7 +107,9 @@ function due(db, key, seconds) {
   kvSet(db, k, nowSec());
   return true;
 }
-const holdsSomething = (db, account, chain) => kvGet(db, `bs-count:${account.id}:${chain.name}`, 1) > 0;
+const holdsSomething = (db, account, chain) =>
+  !kvGet(db, `evm-disc:${account.id}:${chain.name}`, 0) ||
+  db.prepare('SELECT COUNT(*) AS n FROM balances WHERE account_id = ? AND asset LIKE ?').get(account.id, `${chain.name}:%`).n > 0;
 
 // Set when Blockscout answers "Out of credits": keyed requests pause until then.
 let creditsOutUntil = 0;
@@ -116,46 +123,89 @@ function alchemyDue(db, key, minutes) {
   return true;
 }
 
+// A balance move seen over RPC puts the token list and history reads back on their normal clocks
+// for two reads (an explorer can trail the chain by a few seconds). They are not forced: a
+// rebasing token moves every block, and must never cost more explorer calls than before.
+const DIRTY_ROUNDS = 2;
+const rpcFresh = (db, key, chain) => !!chain.rpcs?.length && nowSec() - kvGet(db, `rpc-ok:${key}`, 0) < 900;
+const isDirty = (db, k) => kvGet(db, k, 0) > 0;
+const useDirty = (db, k) => { const n = kvGet(db, k, 0); if (n > 0) kvSet(db, k, n - 1); };
+
+// Token list and balances from Blockscout (throws when the read fails).
+async function blockscoutBalances(db, account, chain) {
+  const rows = [];
+  registerNative(db, chain);
+  let info;
+  try {
+    info = await api(chain, `/addresses/${account.address}`);
+  } catch (e) {
+    if (/HTTP 404/.test(e.message)) info = { coin_balance: '0', has_tokens: false }; // address never seen on this chain
+    else throw e;
+  }
+  rows.push({ asset: nativeKey(chain), qty: fromUnits(info.coin_balance || '0', 18) });
+  if (info.has_tokens !== false) {
+    for await (const items of pages(chain, `/addresses/${account.address}/tokens`, { maxPages: 20 })) {
+      for (const it of items) {
+        const t = it.token || {};
+        if (NFT_TYPES.has(t.type) || t.decimals == null) continue;
+        const asset = registerToken(db, chain, t);
+        // remembered so the RPC and Alchemy reads (raw balances only) can scale share tokens the same way
+        if (t.ui_multiplier && kvGet(db, `ui-mult:${asset}`, null) !== String(t.ui_multiplier)) kvSet(db, `ui-mult:${asset}`, String(t.ui_multiplier));
+        rows.push({ asset, qty: tokenAmount(it.value, t.decimals, t.ui_multiplier) });
+      }
+    }
+  }
+  replaceBalances(db, account.id, `${chain.name}:`, rows);
+  setStatus(db, `evm:${account.id}:${chain.name}`, true, `${rows.filter((r) => r.qty).length} assets`);
+}
+
 export async function syncEvmBalances(db, cfg, account) {
+  const r = cfg.refresh || {};
   for (const chain of chainsFor(cfg, account)) {
+    const key = `${account.id}:${chain.name}`;
+    const src = `evm:${key}`;
+    const holds = holdsSomething(db, account, chain);
+
+    // 1. Free: refresh known tokens over public RPC, and note whether anything moved.
+    if (chain.rpcs?.length) {
+      if (due(db, `rpc:${key}`, holds ? (r.rpcBalancesSeconds ?? 60) : (r.evmBalancesSeconds ?? 300))) {
+        const res = await syncRpcBalances(db, account, chain);
+        if (res?.changed) { kvSet(db, `evm-dirty:${key}`, DIRTY_ROUNDS); kvSet(db, `evm-dirty-hist:${key}`, DIRTY_ROUNDS); }
+      }
+    }
+
+    // 2. Token list from an explorer: on every round without RPC, otherwise on a move or a slow clock.
+    const quiet = rpcFresh(db, key, chain) && !!kvGet(db, `evm-disc:${key}`, 0); // a first token list is still owed otherwise
+    const dirty = quiet && isDirty(db, `evm-dirty:${key}`);
+    const slow = holds ? (r.rpcDiscoveryMinutes ?? 120) * 60 : (r.rpcEmptyDiscoveryHours ?? 12) * 3600;
+    const calm = quiet && !dirty; // nothing moved: the slow safety clock is enough
+    const alchemyMinutes = calm ? slow / 60 : (r.alchemyBalancesMinutes ?? 10);
+    const found = () => kvSet(db, `evm-disc:${key}`, nowSec());
+    const viaAlchemy = async () => {
+      if (!alchemyDue(db, `balances:${key}`, alchemyMinutes)) return;
+      useDirty(db, `evm-dirty:${key}`); // spent whether or not the read works, so a failing source is not retried every round
+      if (await syncAlchemyBalances(db, cfg, account, chain)) found();
+    };
+
     if (useAlchemy(chain)) {
-      if (alchemyDue(db, `balances:${account.id}:${chain.name}`, cfg.refresh?.alchemyBalancesMinutes ?? 10)) await syncAlchemyBalances(db, cfg, account, chain);
+      await viaAlchemy();
       continue;
     }
-    const src = `evm:${account.id}:${chain.name}`;
-    const every = holdsSomething(db, account, chain) ? (cfg.refresh?.evmBalancesSeconds ?? 300) : (cfg.refresh?.evmEmptyMinutes ?? 60) * 60;
-    if (!due(db, `balances:${account.id}:${chain.name}`, every)) continue;
+    const every = calm ? slow : holds ? (r.evmBalancesSeconds ?? 300) : (r.evmEmptyMinutes ?? 60) * 60;
+    if (!due(db, `balances:${key}`, every)) continue;
     try {
-      const rows = [];
-      registerNative(db, chain);
-      let info;
-      try {
-        info = await api(chain, `/addresses/${account.address}`);
-      } catch (e) {
-        if (/HTTP 404/.test(e.message)) info = { coin_balance: '0', has_tokens: false }; // address never seen on this chain
-        else throw e;
-      }
-      rows.push({ asset: nativeKey(chain), qty: fromUnits(info.coin_balance || '0', 18) });
-      if (info.has_tokens !== false) {
-        for await (const items of pages(chain, `/addresses/${account.address}/tokens`, { maxPages: 20 })) {
-          for (const it of items) {
-            const t = it.token || {};
-            if (NFT_TYPES.has(t.type) || t.decimals == null) continue;
-            const asset = registerToken(db, chain, t);
-            rows.push({ asset, qty: tokenAmount(it.value, t.decimals, t.ui_multiplier) });
-          }
-        }
-      }
-      replaceBalances(db, account.id, `${chain.name}:`, rows);
-      kvSet(db, `bs-count:${account.id}:${chain.name}`, rows.filter((r) => r.qty).length);
-      setStatus(db, src, true, `${rows.filter((r) => r.qty).length} assets`);
+      await blockscoutBalances(db, account, chain);
+      useDirty(db, `evm-dirty:${key}`);
+      found();
     } catch (e) {
       // Blockscout is down, erroring or out of credits: read this chain through Alchemy if possible.
-      if (chain.alchemy && chain.alchemyKey && holdsSomething(db, account, chain)) {
+      if (chain.alchemy && chain.alchemyKey && holds) {
         log.warn(src, `${e.message}; using Alchemy for this round`);
-        if (alchemyDue(db, `balances:${account.id}:${chain.name}`, cfg.refresh?.alchemyBalancesMinutes ?? 10)) await syncAlchemyBalances(db, cfg, account, chain);
+        await viaAlchemy();
         continue;
       }
+      useDirty(db, `evm-dirty:${key}`);
+      if (quiet) { log.warn(src, `${e.message}; balances still come from public RPC`); continue; }
       setStatus(db, src, false, e.message);
       log.warn(src, e.message);
     }
@@ -221,14 +271,25 @@ export async function syncEvmHistory(db, cfg, account) {
     const srcKey = `history-source:${account.id}:${chain.name}`;
     const histSrc = kvGet(db, srcKey, null);
     const canAlchemy = chain.alchemy && chain.alchemyKey;
+    // While public RPC is watching balances, history is only read after a move, plus a slow safety check.
+    const key = `${account.id}:${chain.name}`;
+    const quiet = rpcFresh(db, key, chain);
+    const dirtyKey = `evm-dirty-hist:${key}`;
+    const dirty = quiet && isDirty(db, dirtyKey);
+    const slowMins = (cfg.refresh?.rpcHistoryHours ?? 6) * 60;
+    const calm = quiet && !dirty;
     if (useAlchemy(chain) || (canAlchemy && histSrc === 'alchemy')) {
-      if (alchemyDue(db, `history:${account.id}:${chain.name}`, cfg.refresh?.alchemyHistoryMinutes ?? 60)) await syncAlchemyHistory(db, cfg, account, chain);
+      if (alchemyDue(db, `history:${key}`, calm ? slowMins : (cfg.refresh?.alchemyHistoryMinutes ?? 60))) {
+        useDirty(db, dirtyKey);
+        await syncAlchemyHistory(db, cfg, account, chain);
+      }
       continue;
     }
     const from = kvGet(db, cursorKey, -1); // highest block already synced
     if (from >= 0) {
-      const mins = holdsSomething(db, account, chain) ? (cfg.refresh?.evmHistoryMinutes ?? 30) : (cfg.refresh?.evmEmptyHistoryHours ?? 6) * 60;
-      if (!due(db, `history:${account.id}:${chain.name}`, mins * 60)) continue;
+      const mins = calm ? slowMins : holdsSomething(db, account, chain) ? (cfg.refresh?.evmHistoryMinutes ?? 30) : (cfg.refresh?.evmEmptyHistoryHours ?? 6) * 60;
+      if (!due(db, `history:${key}`, mins * 60)) continue;
+      useDirty(db, dirtyKey);
     }
     try {
       registerNative(db, chain);

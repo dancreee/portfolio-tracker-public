@@ -1,8 +1,8 @@
 // Solana wallets via plain JSON-RPC (public endpoint by default): SOL + SPL / Token-2022 balances and history.
 import { fetchJson, fromUnits, sleep, log, nowSec } from '../util.js';
+import { DEFAULT_RPCS } from '../chains.js';
 import { upsertAsset, replaceBalances, insertEvents, kvGet, kvSet, setStatus } from '../db.js';
 
-const DEFAULT_RPC = 'https://api.mainnet-beta.solana.com';
 const JUP_SEARCH = 'https://lite-api.jup.ag/tokens/v2/search';
 export const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
 export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
@@ -19,7 +19,8 @@ const META_KEY = 'solana-token-meta';
 const META_TTL = 7 * 86400;
 const META_MISS_TTL = 86400;
 
-const rpcUrl = (cfg) => cfg?.settings?.solanaRpc || DEFAULT_RPC;
+// Endpoints to try in order (Settings; defaults in chains.js).
+const rpcUrl = (cfg) => (cfg?.solanaRpcs?.length ? cfg.solanaRpcs : DEFAULT_RPCS.solana);
 const tokenAccountsKey = (accountId) => `solana-token-accounts:${accountId}`;
 const pendingKey = (accountId) => `solana-pending:${accountId}`;
 const cursorKey = (accountId, address) => `solana-sig:${accountId}:${address}`;
@@ -30,7 +31,26 @@ function checkAddress(address) {
   return a;
 }
 
-async function rpc(url, method, params) {
+const benched = new Map(); // endpoint -> unix seconds until which it is skipped
+const hostOf = (u) => { try { return new URL(u).host; } catch { return 'rpc'; } };
+
+// Tries each endpoint in turn. Errors name only the host, since custom URLs often carry a key.
+async function rpc(urls, method, params) {
+  const list = [urls].flat();
+  const live = list.filter((u) => !(benched.get(u) > nowSec()));
+  let last;
+  for (const url of live.length ? live : list) {
+    try {
+      return await rpcOne(url, method, params);
+    } catch (e) {
+      if (list.length > 1) benched.set(url, nowSec() + 600);
+      last = new Error(String(e.message).replaceAll(url, hostOf(url)));
+    }
+  }
+  throw last;
+}
+
+async function rpcOne(url, method, params) {
   for (let attempt = 0; ; attempt++) {
     const r = await fetchJson(url, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params }, timeoutMs: 30000 });
     if (r && !r.error && 'result' in r) return r.result;
