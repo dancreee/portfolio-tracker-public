@@ -1,28 +1,75 @@
 // Hyperliquid: public info API, no key. Spot balances, staking, perps, fills and ledger updates.
-import { fetchJson, num, log } from '../util.js';
+import { fetchJson, num, log, sleep, nowSec } from '../util.js';
 import { upsertAsset, replaceBalances, insertEvents, kvGet, kvSet, setStatus, tx } from '../db.js';
 
 const INFO = 'https://api.hyperliquid.xyz/info';
-const info = (body) => fetchJson(INFO, { method: 'POST', body });
 
-// ---- Market data (shared, refreshed every few seconds) ----
+// Hyperliquid allows 1200 "weight" a minute per IP address, shared with anything else running on
+// the same machine. Light requests cost 2, most others 20. Everything here goes through one budget
+// that stays well under that, and a 429 pauses all requests for a minute instead of retrying.
+const WEIGHT = { clearinghouseState: 2, spotClearinghouseState: 2, allMids: 2 };
+const BUDGET_PER_MINUTE = 500;
+const PAUSE_SECONDS = 60;
+let spent = []; // [ms, weight] of the last minute
+let pausedUntil = 0;
+const SLOW_MSG = 'Hyperliquid asked us to slow down. Pausing its requests for a minute';
+export const hlWeightUsed = () => { const t = Date.now() - 60_000; spent = spent.filter((x) => x[0] > t); return spent.reduce((s, x) => s + x[1], 0); };
+export async function hlInfo(body) {
+  const w = WEIGHT[body.type] ?? 20;
+  for (let i = 0; ; i++) {
+    if (Date.now() < pausedUntil) throw new Error(SLOW_MSG);
+    if (hlWeightUsed() + w <= BUDGET_PER_MINUTE) break;
+    if (i >= 30) throw new Error('Hyperliquid request budget is full, trying again shortly');
+    await sleep(1000);
+  }
+  spent.push([Date.now(), w]);
+  try {
+    return await fetchJson(INFO, { method: 'POST', body, retry429: false });
+  } catch (e) {
+    if (e.status === 429) { pausedUntil = Date.now() + PAUSE_SECONDS * 1000; throw new Error(SLOW_MSG); }
+    throw e;
+  }
+}
+const info = hlInfo;
+export function resetHlLimiter() { spent = []; pausedUntil = 0; lastFull = 0; lastRun.clear(); lastHist.clear(); fp.clear(); dirty.clear(); stakingCache.clear(); spotMeta = null; }
+
+// ---- Market data ----
+// Full market data (names, previous-day prices) once a minute; in between only the mid prices,
+// which is a tenth of the cost.
 let spotMeta = null; // { tokens, universe }
 let pairByName = new Map(); // "@107" -> { base, quote }
 let tokenPair = new Map(); // token name -> pair name quoted in USDC
+let midKeys = new Map(); // price id -> { key in allMids, prev: previous-day price }
+let lastFull = 0;
+const FULL_SECONDS = 60;
 
-export async function refreshHlMarket(db) {
+const UPSERT_PRICE = `INSERT INTO prices (price_id, price, change24h, confidence, updated_at) VALUES (?, ?, ?, 1, ?)
+     ON CONFLICT(price_id) DO UPDATE SET price = excluded.price, change24h = excluded.change24h, updated_at = excluded.updated_at`;
+
+export async function refreshHlMarket(db, { full = false } = {}) {
+  if (!full && spotMeta && nowSec() - lastFull < FULL_SECONDS) {
+    const mids = await info({ type: 'allMids' });
+    const now = nowSec();
+    const upd = db.prepare(UPSERT_PRICE);
+    tx(db, () => {
+      for (const [id, m] of midKeys) {
+        const px = num(mids[m.key]);
+        if (px) upd.run(id, px, m.prev ? px / m.prev - 1 : null, now);
+      }
+    });
+    setStatus(db, 'hyperliquid-market', true, `${midKeys.size} markets`);
+    return;
+  }
   const [spot, perp] = await Promise.all([info({ type: 'spotMetaAndAssetCtxs' }), info({ type: 'metaAndAssetCtxs' })]);
   const [meta, spotCtxs] = spot;
   spotMeta = meta;
   pairByName = new Map();
   tokenPair = new Map();
+  midKeys = new Map();
   const tokenByIndex = new Map(meta.tokens.map((t) => [t.index, t]));
   const ctxByCoin = new Map(spotCtxs.map((c) => [c.coin, c]));
   const now = Math.floor(Date.now() / 1000);
-  const upd = db.prepare(
-    `INSERT INTO prices (price_id, price, change24h, confidence, updated_at) VALUES (?, ?, ?, 1, ?)
-     ON CONFLICT(price_id) DO UPDATE SET price = excluded.price, change24h = excluded.change24h, updated_at = excluded.updated_at`
-  );
+  const upd = db.prepare(UPSERT_PRICE);
   tx(db, () => {
     meta.universe.forEach((u, i) => {
       const base = tokenByIndex.get(u.tokens[0]);
@@ -38,6 +85,7 @@ export async function refreshHlMarket(db) {
       const existing = tokenPair.get(base.name);
       if (existing && existing.vol >= num(ctx.dayNtlVlm)) return;
       tokenPair.set(base.name, { pair: u.name, vol: num(ctx.dayNtlVlm) });
+      midKeys.set(`hl:${base.name}`, { key: u.name, prev });
       upd.run(`hl:${base.name}`, px, prev ? px / prev - 1 : null, now);
     });
     upd.run('hl:USDC', 1, 0, now);
@@ -47,9 +95,11 @@ export async function refreshHlMarket(db) {
       if (!c) return;
       const px = num(c.midPx ?? c.markPx);
       const prev = num(c.prevDayPx);
-      if (px) upd.run(`hlperp:${u.name}`, px, prev ? px / prev - 1 : null, now);
+      if (px) { upd.run(`hlperp:${u.name}`, px, prev ? px / prev - 1 : null, now); midKeys.set(`hlperp:${u.name}`, { key: u.name, prev }); }
     });
   });
+  lastFull = nowSec();
+  setStatus(db, 'hyperliquid-market', true, `${midKeys.size} markets`);
 }
 
 function hlTokenAsset(db, name) {
@@ -65,16 +115,37 @@ const spotBase = (coin) => pairByName.get(coin)?.base || (coin.includes('/') ? c
 const spotQuote = (coin) => pairByName.get(coin)?.quote || (coin.includes('/') ? coin.split('/')[1] : 'USDC');
 const isSpotCoin = (coin) => coin.startsWith('@') || coin.includes('/');
 
-export async function syncHlAccount(db, cfg, account) {
+// Accounts that hold something on Hyperliquid are read every round (two light requests). The rest
+// are looked at every ten minutes, and staking (a heavier request) every five.
+const IDLE_SECONDS = 600;
+const STAKING_SECONDS = 300;
+const lastRun = new Map(); // account id -> unix seconds
+const stakingCache = new Map(); // account id -> { at, value }
+const fp = new Map(); // account id -> balances + position sizes at the last read
+const dirty = new Set(); // accounts whose balances or positions moved since their fills were last read
+const lastHist = new Map(); // account id -> unix seconds of the last fills read
+const hlActive = (db, id) => !!db.prepare("SELECT 1 FROM balances WHERE account_id = ? AND asset LIKE 'hl:%' AND qty > 0 LIMIT 1").get(id)
+  || !!db.prepare("SELECT 1 FROM positions WHERE account_id = ? AND venue = 'hyperliquid' LIMIT 1").get(id);
+
+export async function syncHlAccount(db, cfg, account, { force = false } = {}) {
   const src = `hyperliquid:${account.id}`;
+  const active = hlActive(db, account.id);
+  if (!force && !active && nowSec() - (lastRun.get(account.id) || 0) < IDLE_SECONDS) return;
   try {
-    if (!spotMeta) await refreshHlMarket(db);
+    if (!spotMeta) await refreshHlMarket(db, { full: true });
     const user = account.address;
-    const [spot, perp, staking] = await Promise.all([
+    const cached = stakingCache.get(account.id);
+    const stakingDue = force || !cached || nowSec() - cached.at >= STAKING_SECONDS;
+    const [spot, perp, freshStaking] = await Promise.all([
       info({ type: 'spotClearinghouseState', user }),
       info({ type: 'clearinghouseState', user }),
-      info({ type: 'delegatorSummary', user }).catch(() => null),
+      stakingDue ? info({ type: 'delegatorSummary', user }).catch(() => undefined) : undefined,
     ]);
+    if (freshStaking !== undefined) stakingCache.set(account.id, { at: nowSec(), value: freshStaking });
+    const staking = freshStaking !== undefined ? freshStaking : cached?.value;
+    lastRun.set(account.id, nowSec());
+    const print = JSON.stringify([(spot.balances || []).map((b) => [b.coin, b.total]), (perp.assetPositions || []).map((p) => [p.position?.coin, p.position?.szi])]);
+    if (fp.get(account.id) !== print) { fp.set(account.id, print); dirty.add(account.id); }
     const rows = [];
     for (const b of spot.balances || []) {
       const qty = num(b.total);
@@ -117,10 +188,15 @@ export async function syncHlAccount(db, cfg, account) {
   }
 }
 
-export async function syncHlHistory(db, cfg, account) {
+// Fills and transfers are heavier requests, so they are read when the account's balances or
+// positions moved, and otherwise only every `maxAge` seconds as a safety net.
+export async function syncHlHistory(db, cfg, account, { maxAge = 0 } = {}) {
   const src = `hyperliquid-history:${account.id}`;
+  if (!dirty.has(account.id) && nowSec() - (lastHist.get(account.id) || 0) < maxAge) return 0;
   try {
-    if (!spotMeta) await refreshHlMarket(db);
+    if (!spotMeta) await refreshHlMarket(db, { full: true });
+    dirty.delete(account.id);
+    lastHist.set(account.id, nowSec());
     const user = account.address;
     const key = `hl-fills:${account.id}`;
     let start = kvGet(db, key, 0);

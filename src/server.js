@@ -3,17 +3,17 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { ROOT, loadConfig } from './config.js';
+import { ROOT, loadConfig, userRefresh } from './config.js';
 import { autoChains, DEFAULT_RPCS, cleanRpcs } from './chains.js';
 import { openDb, kvGet, kvSet, setStatus } from './db.js';
-import { log, nowSec } from './util.js';
+import { log, nowSec, usage } from './util.js';
 import { syncEvmBalances, syncEvmHistory, evmForce } from './sources/evm.js';
 import { refreshHlMarket, syncHlAccount, syncHlHistory } from './sources/hyperliquid.js';
 import { syncCexBalances, syncCexHistory } from './sources/cex.js';
 import { syncSolanaBalances, syncSolanaHistory } from './sources/solana.js';
 import { syncPearl } from './sources/pearl.js';
 import { syncManual } from './sources/manual.js';
-import { refreshPrices, refreshTokenLists, markVerifiedFromLists } from './prices.js';
+import { refreshPrices, refreshPriceRefs, refreshTokenLists, markVerifiedFromLists } from './prices.js';
 import { buildLedger } from './ledger.js';
 import { buildSummary } from './portfolio.js';
 
@@ -38,8 +38,22 @@ async function guard(name, fn) {
   try { await fn(); } catch (e) { log.warn(name, e.message); setStatus(db, name, false, e.message); } finally { running.delete(name); }
 }
 
+// Requests sent per service per UTC day (kept for a week), shown under Data sources.
+const utcDay = (offset = 0) => new Date(Date.now() - offset * 86400_000).toISOString().slice(0, 10);
+{
+  const saved = kvGet(db, `usage:${utcDay()}`, null);
+  if (saved) { usage.day = utcDay(); usage.counts = saved; }
+}
+function saveUsage() {
+  if (!usage.day) return;
+  kvSet(db, `usage:${usage.day}`, usage.counts);
+  db.prepare("DELETE FROM kv WHERE k LIKE 'usage:%' AND k < ?").run(`usage:${utcDay(7)}`);
+}
+const usageView = () => ({ today: usage.day === utcDay() ? usage.counts : {}, yesterday: kvGet(db, `usage:${utcDay(1)}`, {}) });
+
 function publish() {
   summary = buildSummary(db, cfg, ledger);
+  summary.usage = usageView();
   const msg = `data: ${JSON.stringify(summary)}\n\n`;
   for (const res of clients) res.write(msg);
 }
@@ -51,11 +65,12 @@ const hasHl = () => hlAccounts().length > 0;
 const jobs = {
   prices: () => guard('prices', async () => {
     if (hasHl()) await refreshHlMarket(db).catch((e) => setStatus(db, 'hyperliquid-market', false, e.message));
+    await refreshPriceRefs(db).catch((e) => log.warn('price references', e.message));
     await refreshPrices(db, cfg);
     publish();
   }),
   hl: () => guard('hl', async () => {
-    for (const a of hlAccounts()) await syncHlAccount(db, cfg, a);
+    for (const a of hlAccounts()) await syncHlAccount(db, cfg, a, { force: nowSec() < evmForce.until });
     publish();
   }),
   balances: () => guard('balances', async () => {
@@ -75,7 +90,7 @@ const jobs = {
   hlFills: () => guard('hlFills', async () => {
     const active = new Set(db.prepare("SELECT DISTINCT account_id FROM balances WHERE asset LIKE 'hl:%' AND qty > 0").all().map((r) => r.account_id));
     let added = 0;
-    for (const a of hlAccounts()) if (active.has(a.id)) added += (await syncHlHistory(db, cfg, a)) || 0;
+    for (const a of hlAccounts()) if (active.has(a.id)) added += (await syncHlHistory(db, cfg, a, { maxAge: 600 })) || 0;
     if (added) {
       ledger = await buildLedger(db, cfg).catch(() => ledger);
       publish();
@@ -88,7 +103,7 @@ const jobs = {
     for (const a of ordered) {
       if (a.type === 'evm') {
         await syncEvmHistory(db, cfg, a);
-        if (a.extra?.hyperliquid !== false) await syncHlHistory(db, cfg, a);
+        if (a.extra?.hyperliquid !== false) await syncHlHistory(db, cfg, a, { maxAge: nowSec() < evmForce.until ? 0 : 3600 });
       } else if (a.type === 'solana') await syncSolanaHistory(db, cfg, a);
       else if (a.type === 'cex') await syncCexHistory(db, cfg, a);
       // rebuild after each account so cost basis fills in progressively on first sync
@@ -132,6 +147,7 @@ function schedule() {
     setInterval(jobs.balances, r.balancesSeconds * 1000),
     setInterval(jobs.history, r.historyMinutes * 60_000),
     setInterval(jobs.snapshot, r.snapshotMinutes * 60_000),
+    setInterval(saveUsage, 60_000),
   ];
 }
 
@@ -247,7 +263,7 @@ const server = http.createServer(async (req, res) => {
       req.on('close', () => clients.delete(res));
       return;
     }
-    if (p === '/api/summary') return send(res, 200, summary || buildSummary(db, cfg, ledger));
+    if (p === '/api/summary') return send(res, 200, summary || { ...buildSummary(db, cfg, ledger), usage: usageView() });
     if (p === '/api/history') {
       const d = url.searchParams.get('days');
       const since = d === 'all' ? 0 : nowSec() - Number(d || 30) * 86400;
@@ -291,7 +307,7 @@ const server = http.createServer(async (req, res) => {
       if (typeof b.blockscoutKey === 'string' && b.blockscoutKey.trim()) kvSet(db, 'setting:blockscoutKey', b.blockscoutKey.trim());
       if (typeof b.alchemyKey === 'string' && b.alchemyKey.trim()) kvSet(db, 'setting:alchemyKey', b.alchemyKey.trim());
       if (b.rpcs && typeof b.rpcs === 'object') saveRpcs(b.rpcs);
-      if (b.refresh) kvSet(db, 'setting:refresh', b.refresh);
+      if (b.refresh) kvSet(db, 'setting:refresh', userRefresh(b.refresh));
       if (b.aliases) kvSet(db, 'setting:aliases', b.aliases);
       reloadConfig();
       return send(res, 200, { ok: true });
@@ -349,6 +365,8 @@ function migrateOwnAddresses() {
   if (n) log.info(`Moved ${n} "other own addresses" into disabled accounts`);
 }
 migrateOwnAddresses();
+
+for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { try { saveUsage(); } catch { /* shutting down anyway */ } process.exit(0); });
 
 server.listen(PORT, HOST, () => {
   log.info(`Portfolio tracker running at http://${HOST === '127.0.0.1' ? 'localhost' : HOST}:${PORT} (${cfg.accounts.length} accounts)`);

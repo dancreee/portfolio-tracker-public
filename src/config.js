@@ -13,6 +13,11 @@ export const DEFAULT_ALIASES = {
   XBT: 'BTC', XXBT: 'BTC', XETH: 'ETH', ZUSD: 'USD',
 };
 
+// Only the intervals shown in Settings are taken from the saved settings; the rest follow the code,
+// so a tuning change in an update is not masked by an old saved copy of the defaults.
+export const USER_REFRESH_KEYS = ['pricesSeconds', 'hyperliquidSeconds', 'balancesSeconds', 'historyMinutes'];
+export const userRefresh = (saved) => Object.fromEntries(USER_REFRESH_KEYS.filter((k) => Number(saved?.[k]) > 0).map((k) => [k, Number(saved[k])]));
+
 // Accounts and settings live in the local SQLite database and are edited from the Settings page.
 export function loadConfig(db) {
   const all = db.prepare('SELECT * FROM accounts ORDER BY sort, label').all();
@@ -30,7 +35,7 @@ export function loadConfig(db) {
     aliases,
     chains: resolveChains(settings.chains || {}, settings.blockscoutKey || process.env.BLOCKSCOUT_API_KEY || '', settings.alchemyKey || process.env.ALCHEMY_API_KEY || '', settings.rpcs || {}),
     stables: new Set([...STABLES, ...(settings.stables || []).map((s) => s.toUpperCase())]),
-    refresh: { pricesSeconds: 15, hyperliquidSeconds: 10, balancesSeconds: 60, historyMinutes: 5, snapshotMinutes: 5, evmBalancesSeconds: 300, evmEmptyMinutes: 60, evmHistoryMinutes: 30, evmEmptyHistoryHours: 6, alchemyBalancesMinutes: 10, alchemyHistoryMinutes: 60, rpcDiscoveryMinutes: 120, rpcEmptyDiscoveryHours: 12, rpcHistoryHours: 6, ...(settings.refresh || {}) },
+    refresh: { pricesSeconds: 15, hyperliquidSeconds: 10, balancesSeconds: 60, historyMinutes: 5, snapshotMinutes: 5, evmBalancesSeconds: 300, evmEmptyMinutes: 60, evmHistoryMinutes: 30, evmEmptyHistoryHours: 6, alchemyBalancesMinutes: 10, alchemyHistoryMinutes: 60, rpcDiscoveryMinutes: 120, rpcEmptyDiscoveryHours: 12, rpcHistoryHours: 24, ...userRefresh(settings.refresh) },
     // Every account counts as yours, including disabled ones (wallets you own but do not track):
     // moves between them are internal and keep their cost basis.
     ownAddresses: new Set(all.filter((a) => a.address).map((a) => a.address.toLowerCase())),

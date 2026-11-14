@@ -7,8 +7,9 @@ export function buildSummary(db, cfg, ledger) {
   const accounts = new Map(cfg.accounts.map((a) => [a.id, a]));
   const rows = db.prepare(`
     SELECT b.account_id, b.asset, b.qty, b.meta, b.updated_at, a.symbol, a.name, a.chain, a.verified, a.price_id,
-           p.price, p.change24h, p.confidence, p.source AS price_source, p.updated_at AS price_at
-    FROM balances b JOIN assets a ON a.asset = b.asset LEFT JOIN prices p ON p.price_id = a.price_id`).all()
+           p.price, p.change24h, p.confidence, p.source AS price_source, p.updated_at AS price_at, f.p7d, f.p30d
+    FROM balances b JOIN assets a ON a.asset = b.asset LEFT JOIN prices p ON p.price_id = a.price_id
+    LEFT JOIN price_refs f ON f.price_id = a.price_id`).all()
     .filter((r) => accounts.has(r.account_id));
 
   const groups = new Map();
@@ -22,12 +23,20 @@ export function buildSummary(db, cfg, ledger) {
       continue;
     }
     const g = groupOf(r.symbol, cfg);
-    if (!groups.has(g)) groups.set(g, { group: g, qty: 0, value: 0, change24hUsd: 0, holdings: [], priceAt: 0 });
+    if (!groups.has(g)) groups.set(g, { group: g, qty: 0, value: 0, change24hUsd: 0, change7dUsd: 0, change30dUsd: 0, known7d: 0, known30d: 0, holdings: [], priceAt: 0 });
     const G = groups.get(g);
     G.qty += r.qty;
     G.value += value;
     const ch = r.change24h != null ? value - value / (1 + r.change24h) : 0;
     G.change24hUsd += ch;
+    // 7 and 30 day change: today's holding valued at the price back then (stablecoins count as flat).
+    const stableG = cfg.stables.has(g);
+    for (const [k, ref] of [['7d', r.p7d], ['30d', r.p30d]]) {
+      const old = stableG ? r.price : ref;
+      if (!(old > 0) || !(r.price > 0)) continue;
+      G[`change${k}Usd`] += value - old * r.qty;
+      G[`known${k}`] += value;
+    }
     G.priceAt = Math.max(G.priceAt, r.price_at || 0);
     G.holdings.push({
       account: r.account_id, accountLabel: accounts.get(r.account_id)?.label, asset: r.asset, chain: r.chain, symbol: r.symbol, name: r.name,
@@ -62,6 +71,9 @@ export function buildSummary(db, cfg, ledger) {
       value: G.value,
       change24h: changes.length ? G.change24hUsd / (G.value - G.change24hUsd || 1) : null,
       change24hUsd: G.change24hUsd,
+      // shown only when (nearly) the whole holding has a price from back then
+      change7d: G.value > 0 && G.known7d >= G.value * 0.98 ? G.change7dUsd / (G.value - G.change7dUsd || 1) : null,
+      change30d: G.value > 0 && G.known30d >= G.value * 0.98 ? G.change30dUsd / (G.value - G.change30dUsd || 1) : null,
       share: total ? G.value / total : 0,
       avgCost,
       costSource: source,
@@ -90,7 +102,10 @@ export function buildSummary(db, cfg, ledger) {
   const positions = db.prepare('SELECT * FROM positions ORDER BY ABS(value) DESC').all();
   const perpRealized = db.prepare('SELECT COALESCE(SUM(closed_pnl - fee), 0) AS pnl FROM perp_fills').get().pnl;
   const totalUnrealized = assets.reduce((s, a) => s + (a.unrealized || 0), 0);
-  const status = db.prepare('SELECT * FROM source_status ORDER BY source').all();
+  // Rows for accounts that are disabled or gone are left out: nothing is reading them any more.
+  const isAccountId = (x) => /^[0-9a-f]{8}$/.test(x);
+  const status = db.prepare('SELECT * FROM source_status ORDER BY source').all()
+    .filter((x) => String(x.source).split(':').every((part) => !isAccountId(part) || accounts.has(part)));
 
   return {
     at: Math.floor(Date.now() / 1000),

@@ -35,6 +35,9 @@ export function openDb(file = process.env.PORTFOLIO_DB || path.join(ROOT, 'data'
     CREATE TABLE IF NOT EXISTS prices (
       price_id TEXT PRIMARY KEY, price REAL, change24h REAL, confidence REAL, updated_at INTEGER, source TEXT
     );
+    CREATE TABLE IF NOT EXISTS price_refs (
+      price_id TEXT PRIMARY KEY, p7d REAL, p30d REAL, updated_at INTEGER   -- price 7 and 30 days ago
+    );
     CREATE TABLE IF NOT EXISTS price_history (
       price_id TEXT, ts INTEGER, price REAL, PRIMARY KEY (price_id, ts)
     );

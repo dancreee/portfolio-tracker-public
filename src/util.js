@@ -37,8 +37,27 @@ async function paced(host, fn) {
   }
 }
 
-export async function fetchJson(url, { method = 'GET', body, headers = {}, timeoutMs = 20000, retries = 3 } = {}) {
+// Requests sent per service, so Settings can show what each one is really used for.
+// Counted in memory per UTC day; the server saves it to the database now and then.
+export const usage = { day: '', counts: {} };
+const utcDay = () => new Date().toISOString().slice(0, 10);
+export function serviceOf(host) {
+  if (/blockscout\.com$/.test(host)) return 'Blockscout';
+  if (/alchemy\.com$/.test(host)) return 'Alchemy';
+  if (host === 'api.hyperliquid.xyz') return 'Hyperliquid';
+  if (host === 'coins.llama.fi') return 'DefiLlama';
+  if (/kraken\.com$|binance\.com$/.test(host)) return 'Exchanges';
+  return 'Other';
+}
+export function countRequest(service) {
+  const d = utcDay();
+  if (usage.day !== d) { usage.day = d; usage.counts = {}; }
+  usage.counts[service] = (usage.counts[service] || 0) + 1;
+}
+
+export async function fetchJson(url, { method = 'GET', body, headers = {}, timeoutMs = 20000, retries = 3, service, retry429 = true } = {}) {
   const host = new URL(url).host;
+  const svc = service || serviceOf(host);
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -46,6 +65,7 @@ export async function fetchJson(url, { method = 'GET', body, headers = {}, timeo
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), timeoutMs);
         try {
+          countRequest(svc);
           const res = await fetch(url, {
             method,
             headers: {
@@ -59,7 +79,8 @@ export async function fetchJson(url, { method = 'GET', body, headers = {}, timeo
           });
           if (res.status === 429 || res.status >= 500) {
             const err = new Error(`HTTP ${res.status} from ${host}`);
-            err.retryable = true;
+            err.retryable = res.status !== 429 || retry429;
+            err.status = res.status;
             throw err;
           }
           if (!res.ok) {

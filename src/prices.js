@@ -7,7 +7,7 @@
 // DefiLlama prices it with good confidence, or it has real DEX liquidity.
 import { fetchJson, num, hourBucket, log, nowSec } from './util.js';
 import { kvGet, kvSet, setStatus, tx } from './db.js';
-import { hlPairFor } from './sources/hyperliquid.js';
+import { hlPairFor, hlInfo } from './sources/hyperliquid.js';
 
 const LLAMA = 'https://coins.llama.fi';
 const MIN_DEX_LIQUIDITY = 25_000;
@@ -115,6 +115,33 @@ export async function refreshPrices(db, cfg) {
   setStatus(db, 'prices', ok, msgs.join(' · '));
 }
 
+// ---- Price 7 and 30 days ago for everything held now (for the 7d / 30d change columns) ----
+// Reuses the cost-basis price history, so it costs a handful of requests every few hours.
+const REF_STEP = 3 * 3600;
+let refsFor = 0; // the step the references were last built for
+let refsIds = '';
+let refsRetryAt = Infinity;
+export async function refreshPriceRefs(db) {
+  const step = Math.floor(nowSec() / REF_STEP) * REF_STEP;
+  const ids = db.prepare(`SELECT DISTINCT a.price_id FROM assets a JOIN balances b ON b.asset = a.asset
+                          WHERE a.price_id IS NOT NULL AND b.qty > 0`).all().map((r) => r.price_id).filter((id) => !/^(cex|gt|manual):/.test(id));
+  const key = [...ids].sort().join(',');
+  if (step === refsFor && key === refsIds && nowSec() < refsRetryAt) return;
+  const t7 = step - 7 * 86400;
+  const t30 = step - 30 * 86400;
+  const got = await historicalPrices(db, ids.flatMap((priceId) => [{ priceId, ts: t7 }, { priceId, ts: t30 }]));
+  const put = db.prepare(`INSERT INTO price_refs (price_id, p7d, p30d, updated_at) VALUES (?, ?, ?, ?)
+                          ON CONFLICT(price_id) DO UPDATE SET p7d = COALESCE(excluded.p7d, price_refs.p7d), p30d = COALESCE(excluded.p30d, price_refs.p30d), updated_at = excluded.updated_at`);
+  tx(db, () => {
+    for (const id of ids) put.run(id, got.get(`${id}@${hourBucket(t7)}`) || null, got.get(`${id}@${hourBucket(t30)}`) || null, nowSec());
+  });
+  refsFor = step;
+  refsIds = key;
+  // Anything still without a 7 day price (a failed request, or a token too new to have one) is looked up again in half an hour.
+  const missing = ids.some((id) => !got.get(`${id}@${hourBucket(t7)}`));
+  refsRetryAt = missing ? nowSec() + 1800 : Infinity;
+}
+
 // ---- Public token lists: mark tokens as verified so airdropped spam stays out of totals ----
 export async function refreshTokenLists(db, cfg) {
   const last = kvGet(db, 'tokenlists:at', 0);
@@ -208,8 +235,7 @@ export async function historicalPrices(db, needs) {
       const start = sorted[i];
       const end = Math.min(start + 4000 * 3600, now);
       try {
-        const candles = await fetchJson('https://api.hyperliquid.xyz/info', { method: 'POST',
-          body: { type: 'candleSnapshot', req: { coin, interval: '1h', startTime: start * 1000, endTime: end * 1000 + 3600_000 } } });
+        const candles = await hlInfo({ type: 'candleSnapshot', req: { coin, interval: '1h', startTime: start * 1000, endTime: end * 1000 + 3600_000 } });
         const byHour = new Map((candles || []).map((c) => [hourBucket(Math.floor(c.t / 1000)), num(c.c)]));
         while (i < sorted.length && sorted[i] <= end) {
           const p = byHour.get(sorted[i]);

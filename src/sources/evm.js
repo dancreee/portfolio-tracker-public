@@ -3,6 +3,7 @@
 //   2. Blockscout (free credits): which tokens a wallet holds, and its transfer history
 //   3. Alchemy (paid per request): the same two jobs where Blockscout cannot serve them
 // While the RPC read works, 2 and 3 run on a slow safety clock, and at their usual pace only after a balance moved.
+// A failed history read waits an hour before it is tried again, and a long first read resumes where it stopped.
 // Blockscout lists every token an address holds (including new standards such as the
 // ERC-8056 tokenized stocks on Robinhood Chain), so new assets show up on their own.
 import { fetchJson, fromUnits, num, log, nowSec } from '../util.js';
@@ -64,12 +65,15 @@ const api = async (chain, path, params) => {
   }
   const qs = q.size ? `?${q}` : '';
   try {
-    return await fetchJson(`${base}${path}${qs}`, { timeoutMs: 30000, retries: 1 });
+    const r = await fetchJson(`${base}${path}${qs}`, { timeoutMs: 30000, retries: 1 });
+    if (q.has('apikey')) creditsOk();
+    return r;
   } catch (e) {
     if (/HTTP 402/.test(e.message)) {
       if (/Featured chain/i.test(e.message)) throw new Error(`${chain.name} is not on Blockscout's free plan: add a free Alchemy API key under Settings`);
       if (/out of credits/i.test(e.message)) {
         creditsOutUntil = nowSec() + 3600;
+        if (statusDb) setStatus(statusDb, 'blockscout', false, 'Daily credits are used up. Balances still come from public RPCs; new tokens and history catch up when credits return (checked hourly)');
         if (chain.keyless) return api(chain, path, params); // this chain's own explorer answers without a key
         throw new Error(OUT_MSG);
       }
@@ -84,13 +88,14 @@ const api = async (chain, path, params) => {
 };
 
 // Walk a paginated Blockscout list (newest first).
-async function* pages(chain, path, { maxPages = MAX_PAGES_FIRST_SYNC } = {}) {
-  let params = null;
+async function* pages(chain, path, { maxPages = MAX_PAGES_FIRST_SYNC, start = null, onNext = null } = {}) {
+  let params = start;
   for (let i = 0; i < maxPages; i++) {
     const r = await api(chain, path, params);
     yield r.items || [];
     if (!r.next_page_params) return;
     params = Object.fromEntries(Object.entries(r.next_page_params).filter(([, v]) => v != null));
+    if (onNext) onNext(params);
   }
 }
 
@@ -112,7 +117,16 @@ const holdsSomething = (db, account, chain) =>
   db.prepare('SELECT COUNT(*) AS n FROM balances WHERE account_id = ? AND asset LIKE ?').get(account.id, `${chain.name}:%`).n > 0;
 
 // Set when Blockscout answers "Out of credits": keyed requests pause until then.
+// One "blockscout" status row reports it, instead of an error on every wallet and chain.
 let creditsOutUntil = 0;
+let statusDb = null;
+let creditsNoted = 0;
+function creditsOk() {
+  if (!statusDb || nowSec() - creditsNoted < 300) return;
+  creditsNoted = nowSec();
+  setStatus(statusDb, 'blockscout', true, 'answering');
+}
+export const resetBlockscout = () => { creditsOutUntil = 0; creditsNoted = 0; };
 const OUT_MSG = 'Blockscout daily credits are used up. Showing the last known data and retrying within the hour';
 
 // Alchemy bills per request, so its calls run on their own slower clock.
@@ -155,11 +169,15 @@ async function blockscoutBalances(db, account, chain) {
       }
     }
   }
+  // A token the wallet did not hold before means something happened that history has not seen yet.
+  const before = new Set(db.prepare('SELECT asset FROM balances WHERE account_id = ? AND asset LIKE ?').all(account.id, `${chain.name}:%`).map((r) => r.asset));
+  if (rows.some((r) => r.qty && !before.has(r.asset))) kvSet(db, `evm-dirty-hist:${account.id}:${chain.name}`, DIRTY_ROUNDS);
   replaceBalances(db, account.id, `${chain.name}:`, rows);
   setStatus(db, `evm:${account.id}:${chain.name}`, true, `${rows.filter((r) => r.qty).length} assets`);
 }
 
 export async function syncEvmBalances(db, cfg, account) {
+  statusDb = db;
   const r = cfg.refresh || {};
   for (const chain of chainsFor(cfg, account)) {
     const key = `${account.id}:${chain.name}`;
@@ -260,7 +278,10 @@ export function internalEvents(chain, accountId, me, t) {
   return out;
 }
 
+const HISTORY_RETRY_SECONDS = 3600;
+
 export async function syncEvmHistory(db, cfg, account) {
+  statusDb = db;
   const me = account.address;
   for (const chain of chainsFor(cfg, account)) {
     const src = `evm-history:${account.id}:${chain.name}`;
@@ -276,7 +297,7 @@ export async function syncEvmHistory(db, cfg, account) {
     const quiet = rpcFresh(db, key, chain);
     const dirtyKey = `evm-dirty-hist:${key}`;
     const dirty = quiet && isDirty(db, dirtyKey);
-    const slowMins = (cfg.refresh?.rpcHistoryHours ?? 6) * 60;
+    const slowMins = (cfg.refresh?.rpcHistoryHours ?? 24) * 60;
     const calm = quiet && !dirty;
     if (useAlchemy(chain) || (canAlchemy && histSrc === 'alchemy')) {
       if (alchemyDue(db, `history:${key}`, calm ? slowMins : (cfg.refresh?.alchemyHistoryMinutes ?? 60))) {
@@ -286,6 +307,10 @@ export async function syncEvmHistory(db, cfg, account) {
       continue;
     }
     const from = kvGet(db, cursorKey, -1); // highest block already synced
+    // After a failure the next try waits an hour ("Refresh now" skips the wait), so a wallet whose
+    // history cannot be read does not spend requests every few minutes.
+    const retryKey = `hist-retry:${key}`;
+    if (nowSec() >= evmForce.until && nowSec() < kvGet(db, retryKey, 0)) continue;
     if (from >= 0) {
       const mins = calm ? slowMins : holdsSomething(db, account, chain) ? (cfg.refresh?.evmHistoryMinutes ?? 30) : (cfg.refresh?.evmEmptyHistoryHours ?? 6) * 60;
       if (!due(db, `history:${key}`, mins * 60)) continue;
@@ -293,17 +318,32 @@ export async function syncEvmHistory(db, cfg, account) {
     }
     try {
       registerNative(db, chain);
-      const ev = [];
-      let maxBlock = from;
+      // Progress is saved page by page, so a long first read that fails part way resumes there
+      // instead of starting over. Events are stored as they arrive (their ids make re-reads harmless).
+      const resumeKey = `hist-resume:${key}`;
+      let resume = kvGet(db, resumeKey, null);
+      if (resume && resume.from !== from) resume = null;
+      let maxBlock = Math.max(from, resume?.maxBlock ?? from);
+      let added = 0;
+      const done = new Set(resume?.done || []);
       const walk = async (path, handle) => {
-        outer: for await (const items of pages(chain, `/addresses/${me}/${path}`)) {
+        if (done.has(path)) return;
+        const start = resume?.path === path ? resume.params : null;
+        const save = (params) => kvSet(db, resumeKey, { from, done: [...done], path, params, maxBlock });
+        outer: for await (const items of pages(chain, `/addresses/${me}/${path}`, { start, onNext: save })) {
+          const ev = [];
+          let old = false;
           for (const it of items) {
             const block = Number(it.block_number ?? 0);
-            if (block < from) break outer; // already synced (the cursor block is re-read; ids dedupe)
+            if (block < from) { old = true; break; } // already synced (the cursor block is re-read; ids dedupe)
             maxBlock = Math.max(maxBlock, block);
             ev.push(...handle(it));
           }
+          added += insertEvents(db, ev);
+          if (old) break outer;
         }
+        done.add(path);
+        kvSet(db, resumeKey, { from, done: [...done], path: null, params: null, maxBlock });
       };
       await walk('token-transfers', (t) => {
         const tok = t.token || {};
@@ -313,12 +353,24 @@ export async function syncEvmHistory(db, cfg, account) {
       await walk('transactions', (t) => transactionEvents(chain, account.id, me, t));
       await walk('internal-transactions', (t) => internalEvents(chain, account.id, me, t));
 
-      const added = insertEvents(db, ev);
-      kvSet(db, cursorKey, maxBlock);
+      // A wallet with no activity on this chain still gets a cursor (0). Without one it counted as
+      // "never read" and was read again on every history round, which is what used up the credits.
+      kvSet(db, cursorKey, Math.max(maxBlock, 0));
+      kvSet(db, `bs-last:history:${key}`, nowSec());
+      kvSet(db, resumeKey, null);
+      kvSet(db, retryKey, 0);
       setStatus(db, src, true, `${added} new events`);
       if (added) log.info(src, `${added} new events`);
     } catch (e) {
-      if (/HTTP 404/.test(e.message)) { setStatus(db, src, true, 'no activity'); continue; }
+      if (/HTTP 404/.test(e.message)) { if (from < 0) kvSet(db, cursorKey, 0); setStatus(db, src, true, 'no activity'); continue; }
+      kvSet(db, retryKey, nowSec() + HISTORY_RETRY_SECONDS);
+      kvSet(db, `bs-last:history:${key}`, 0); // the read is still owed once the wait is over
+      if (e.message === OUT_MSG && from >= 0) {
+        // Nothing is wrong with this wallet: its history is complete up to the last read and the next
+        // read waits for credits. The single "blockscout" row carries the warning.
+        setStatus(db, src, true, 'up to date as of the last read; the next read waits for Blockscout credits');
+        continue;
+      }
       if (canAlchemy && !histSrc && kvGet(db, cursorKey, null) == null) {
         try {
           log.warn(src, `${e.message}; falling back to Alchemy`);

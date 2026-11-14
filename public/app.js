@@ -281,6 +281,8 @@ const S = {
   sort: prefs.get('sort', { key: 'value', dir: -1 }),
   expanded: new Set(), // asset groups expanded inline on the Assets view
   hideSmall: prefs.get('hideSmall', true),
+  period: prefs.get('period', '24h'), // which change the narrow Assets layout shows
+
   showAllOverview: false,
   search: '',
   accExpanded: new Set(),
@@ -736,9 +738,13 @@ const overview = {
 };
 
 // ───────────────────────── assets ─────────────────────────
+// Wide screens show every column. Phones show Asset (with the amount under it), Price, one change
+// column whose period is picked with the 24h / 7d / 30d switch, and Value (with PnL under it).
+// 'hm' = hidden on mobile, 'moc' = mobile-only cell.
+const PERIODS = ['24h', '7d', '30d'];
 const ASSET_COLS = [
-  ['group', 'Asset'], ['qty', 'Amount'], ['price', 'Price'], ['change24h', '24h'], ['value', 'Value'], ['share', 'Share'],
-  ['avgCost', 'Avg cost'], ['costBasis', 'Cost basis'], ['pnl', 'PnL'],
+  ['group', 'Asset', ''], ['qty', 'Amount', 'hm'], ['price', 'Price', ''], ['change24h', '24h', 'hm'], ['change7d', '7d', 'hm'], ['change30d', '30d', 'hm'],
+  ['chg', '', 'moc'], ['value', 'Value', ''], ['share', 'Share', 'hm hs'], ['avgCost', 'Avg cost', 'hm'], ['costBasis', 'Cost basis', 'hm'], ['pnl', 'PnL', 'hm'],
 ];
 function sortAssets(list) {
   const { key, dir } = S.sort;
@@ -772,11 +778,12 @@ const assets = {
       <div class="toolbar">
         <input id="asSearch" type="search" placeholder="Filter assets…" autocomplete="off" spellcheck="false" value="${esc(S.search)}" aria-label="Filter assets">
         <label class="check"><input type="checkbox" id="asSmall" ${S.hideSmall ? 'checked' : ''}> Hide balances under $1</label>
+        <span class="seg mo" id="asPeriod" role="group" aria-label="Change period">${PERIODS.map((x) => `<button type="button" data-period="${x}">${x}</button>`).join('')}</span>
         <span class="dim grow" id="asCount"></span>
       </div>
       <div class="panel flush">
         <div class="scroll"><table id="asTable" class="sticky1 tbl-assets">
-          <thead><tr>${ASSET_COLS.map(([k, label]) => `<th class="sort" data-sort="${k}" tabindex="0">${label}</th>`).join('')}</tr></thead>
+          <thead><tr>${ASSET_COLS.map(([k, label, c]) => `<th class="sort ${c}" data-sort="${k}" tabindex="0">${label}</th>`).join('')}</tr></thead>
           <tbody></tbody>
           <tfoot><tr id="asFoot"></tr></tfoot>
         </table></div>
@@ -788,6 +795,15 @@ const assets = {
       </details>`;
     $('#asSearch').addEventListener('input', (e) => { S.search = e.target.value; this.update(S.summary); });
     $('#asSmall').addEventListener('change', (e) => { S.hideSmall = e.target.checked; prefs.set('hideSmall', S.hideSmall); this.update(S.summary); });
+    $('#asPeriod').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-period]');
+      if (!b) return;
+      // a sort on the old period's change follows the switch
+      if (S.sort.key === `change${S.period}`) { S.sort = { ...S.sort, key: `change${b.dataset.period}` }; prefs.set('sort', S.sort); }
+      S.period = b.dataset.period;
+      prefs.set('period', S.period);
+      this.update(S.summary);
+    });
     const sortBy = (th) => {
       const k = th.dataset.sort;
       S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: k === 'group' ? 1 : -1 };
@@ -814,6 +830,12 @@ const assets = {
   },
   update(s) {
     if (!s) return;
+    if (!PERIODS.includes(S.period)) S.period = '24h';
+    const chgKey = `change${S.period}`;
+    for (const b of $$('#asPeriod button')) b.classList.toggle('on', b.dataset.period === S.period);
+    const mth = $('#asTable th.moc');
+    mth.dataset.sort = chgKey;
+    if (mth.firstChild?.nodeValue !== S.period) mth.textContent = S.period;
     for (const th of $$('#asTable th.sort')) {
       const on = th.dataset.sort === S.sort.key;
       if (on) th.setAttribute('aria-sort', S.sort.dir > 0 ? 'ascending' : 'descending'); else th.removeAttribute('aria-sort');
@@ -831,15 +853,18 @@ const assets = {
         key: a.group,
         cls: `click${open ? ' open' : ''}`,
         cells: [
-          { h: `<div class="asset"><button type="button" class="chev" aria-label="${open ? 'Collapse' : 'Expand'} holdings" aria-expanded="${open}"></button>${avatar(a.group)}<div class="asset-t"><span class="sym">${esc(clip(a.group, 16))}</span><small>${a.holdings.length} holding${a.holdings.length === 1 ? '' : 's'}${a.trades ? ` · ${a.trades} trades` : ''}</small></div></div>` },
-          { h: qty(a.qty) },
+          { h: `<div class="asset"><button type="button" class="chev" aria-label="${open ? 'Collapse' : 'Expand'} holdings" aria-expanded="${open}"></button>${avatar(a.group)}<div class="asset-t"><span class="sym">${esc(clip(a.group, 16))}</span><small class="dk">${a.holdings.length} holding${a.holdings.length === 1 ? '' : 's'}${a.trades ? ` · ${a.trades} trades` : ''}</small><small class="mo">${qty(a.qty)}</small></div></div>` },
+          { h: qty(a.qty), c: 'hm' },
           { h: priceH(a.price), v: a.price },
-          { h: pctCell(a.change24h) },
-          { h: money(a.value), v: a.value },
-          { h: shareCell(a.share) },
-          { h: isNum(a.avgCost) ? `${priceH(a.avgCost)}${partial ? `<small class="warn" title="Cost basis is known for ${pct(a.coverage, { sign: false, dp: 0 })} of this holding">◐ ${pct(a.coverage, { sign: false, dp: 0 })} known</small>` : ''}` : '<span class="dim">—</span>', c: 'two' },
-          { h: isNum(a.costBasis) ? money(a.costBasis) : '<span class="dim">—</span>' },
-          { h: pnlCell(a.pnl, a.pnlPct), c: 'two', v: a.pnl },
+          { h: pctCell(a.change24h), c: 'hm' },
+          { h: pctCell(a.change7d), c: 'hm' },
+          { h: pctCell(a.change30d), c: 'hm' },
+          { h: pctCell(a[chgKey]), c: 'moc' },
+          { h: `${money(a.value)}<small class="mo ${pnlCls(a.pnl)}">${isNum(a.pnl) ? usd(a.pnl, { sign: true }) : '&nbsp;'}</small>`, v: a.value },
+          { h: shareCell(a.share), c: 'hm hs' },
+          { h: isNum(a.avgCost) ? `${priceH(a.avgCost)}${partial ? `<small class="warn" title="Cost basis is known for ${pct(a.coverage, { sign: false, dp: 0 })} of this holding">◐ ${pct(a.coverage, { sign: false, dp: 0 })} known</small>` : ''}` : '<span class="dim">—</span>', c: 'hm two' },
+          { h: isNum(a.costBasis) ? money(a.costBasis) : '<span class="dim">—</span>', c: 'hm' },
+          { h: pnlCell(a.pnl, a.pnlPct), c: 'hm two', v: a.pnl },
         ],
         detail: open ? holdingsDetail(a) : null,
       };
@@ -847,8 +872,8 @@ const assets = {
     const sum = (k) => list.reduce((t, a) => t + (isNum(a[k]) ? a[k] : 0), 0);
     const un = sum('pnl');
     const cb = list.reduce((t, a) => t + (a.stable ? 0 : a.costBasis || 0), 0);
-    setHTML($('#asFoot'), list.length ? `<td>Total <span class="dim">· ${list.length}</span></td><td></td><td></td><td></td><td>${money(sum('value'))}</td><td>${pct(sum('share'), { sign: false, dp: 1 })}</td><td></td>`
-      + `<td>${money(sum('costBasis'))}</td><td class="two"><span class="${pnlCls(un)}">${usd(un, { sign: true })}</span>${cb ? `<small class="${pnlCls(un)}">${pct(un / cb)}</small>` : ''}</td>` : '');
+    setHTML($('#asFoot'), list.length ? `<td>Total <span class="dim">· ${list.length}</span></td><td class="hm"></td><td></td><td class="hm"></td><td class="hm"></td><td class="hm"></td><td class="moc"></td><td>${money(sum('value'))}<small class="mo ${pnlCls(un)}">${usd(un, { sign: true })}</small></td><td class="hm hs">${pct(sum('share'), { sign: false, dp: 1 })}</td><td class="hm"></td>`
+      + `<td class="hm">${money(sum('costBasis'))}</td><td class="hm two"><span class="${pnlCls(un)}">${usd(un, { sign: true })}</span>${cb ? `<small class="${pnlCls(un)}">${pct(un / cb)}</small>` : ''}</td>` : '');
 
     const hid = s.hidden || [];
     $('#hiddenBox').hidden = !hid.length;
@@ -973,7 +998,7 @@ function updateDrawer() {
     const pe = $('#drPrice');
     if (setHTML(pe, priceH(a.price)) && isNum(pe._v) && pe._v !== a.price) flash(pe, a.price > pe._v);
     pe._v = a.price;
-    setHTML($('#drChg'), `<span class="${pnlCls(a.change24h)}">${pct(a.change24h)}</span> <span class="dim">24h</span>`);
+    setHTML($('#drChg'), PERIODS.map((x) => `<span class="chg1"><span class="${pnlCls(a[`change${x}`])}">${pct(a[`change${x}`])}</span> <span class="dim">${x}</span></span>`).join(''));
     const src = a.costSource === 'hyperliquid' ? 'entry reported by Hyperliquid' : a.costSource === 'stable' ? 'stablecoin, $1' : 'average cost';
     setHTML($('#drKpis'),
       kpi('Holding', qty(a.qty), `${pct(a.share, { sign: false, dp: 1 })} of portfolio`)
@@ -1245,8 +1270,14 @@ function accountRows(s) {
     return { ...a, value: live.get(a.id)?.value ?? 0, hs, failing, sources };
   });
 }
+const SOURCE_JOB = { evm: 'Balances', 'evm-history': 'History', hyperliquid: 'Hyperliquid', 'hyperliquid-history': 'Hyperliquid history', solana: 'Balances', 'solana-history': 'History', cex: 'Balances', 'cex-history': 'History', pearl: 'Pearl' };
+/** "evm-history:ab12cd34:arbitrum" → "History · Arbitrum" (for use under the account's own row) */
+function sourceJob(src, id) {
+  const [kind, ...rest] = String(src).split(':');
+  return [SOURCE_JOB[kind] || kind, ...rest.filter((p) => p !== id).map(chainName)].join(' · ');
+}
 function accountDetail(a) {
-  const fails = a.failing.map((x) => `<div class="acc-fail"><i class="sdot warn"></i><span class="fs">${esc(clip(sourceLabel(x.source), 44))}</span><span class="fm">${esc(clip(x.message || 'failed', 200))}</span><span class="ft">${agoSpan(x.updated_at)}</span></div>`).join('');
+  const fails = a.failing.map((x) => `<div class="acc-fail"><i class="sdot warn"></i><span class="fs">${esc(clip(sourceJob(x.source, a.id), 44))}</span><span class="fm">${esc(clip(x.message || 'failed', 200))}</span><span class="ft">${agoSpan(x.updated_at)}</span></div>`).join('');
   const rows = a.hs.map((h) => `<tr class="click" data-group="${esc(h.group)}"><td><div class="asset">${avatar(h.group, true)}<div class="asset-t"><span class="sym">${esc(clip(h.symbol || h.group, 16))}</span><small class="mo">${esc(chainName(h.chain))}</small></div></div></td>
     <td class="hm">${h.chain ? `<span class="pill">${esc(clip(chainName(h.chain), 16))}</span>` : ''}${holdingNote(h)}</td><td>${qty(h.qty)}</td><td class="hm">${priceH(h.price)}</td><td>${money(h.value)}</td></tr>`).join('');
   const body = a.hs.length
@@ -1611,7 +1642,30 @@ function renderKeys(force) {
       <div class="form-err" id="refErr" role="alert"></div>
     </form>`;
 }
+const SERVICE_ROLE = [
+  ['Public RPC', 'free', 'balances of tokens already found, every minute'],
+  ['Blockscout', 'free daily credits', 'finding new tokens and reading transfer history, only after a balance moved plus a slow safety check'],
+  ['Alchemy', 'paid per request', 'the same two jobs on Base, and elsewhere only when Blockscout cannot answer'],
+  ['Hyperliquid', 'free', 'Hyperliquid balances, positions, fills and prices'],
+  ['DefiLlama', 'free', 'token prices and price history'],
+];
+function renderUsage(s) {
+  const box = $('#stUsage');
+  if (!box || !s) return;
+  const t = s.usage?.today || {};
+  const y = s.usage?.yesterday || {};
+  const n = (v) => (isNum(v) ? nf(0, 0).format(v) : '0');
+  const known = new Set(SERVICE_ROLE.map((r) => r[0]));
+  const other = (o) => Object.entries(o).filter(([k]) => !known.has(k)).reduce((a, [, v]) => a + v, 0);
+  const rows = [...SERVICE_ROLE, ['Everything else', 'free', 'stock prices, token lists, exchanges, Pearl, Solana names']];
+  setHTML(box, `<div class="usage"><div class="uh"><span>Service</span><span>Today</span><span>Yesterday</span></div>${rows.map(([name, cost, role]) => {
+    const a = name === 'Everything else' ? other(t) : t[name];
+    const b = name === 'Everything else' ? other(y) : y[name];
+    return `<div class="ur"><span class="un"><b>${name}</b> <small>${cost}</small><small class="uw">${role}</small></span><span>${n(a)}</span><span class="dim">${n(b)}</span></div>`;
+  }).join('')}</div><p class="note tight">Requests sent per service (days run midnight to midnight UTC).</p>`);
+}
 function renderSources(s) {
+  renderUsage(s);
   const box = $('#stSources');
   if (!box || !s) return;
   const list = [...(s.status || [])].sort((a, b) => (a.ok - b.ok) || String(a.source).localeCompare(String(b.source)));
@@ -1684,6 +1738,7 @@ const settings = {
         The server listens on localhost only, and this page loads no scripts, fonts or images from the internet. Exchange API keys are saved only in that local database, are shown masked, and are never sent back to the browser. Always use read-only keys.</div></div>
       <p class="note pointer">Accounts are managed on the <a href="#accounts">Accounts page</a>.</p>
       <div class="panel"><h3><span>API keys, tracking &amp; refresh</span></h3><div id="stKeys"><div class="empty"><span class="spin"></span>Loading…</div></div></div>
+      <div class="panel"><h3><span>Requests sent</span></h3><div id="stUsage"></div></div>
       <div class="panel"><h3><span>Data sources</span><span id="stSrcN"></span></h3><div id="stSources" class="srcs"></div></div>`;
     renderKeys(true);
     loadAccounts();

@@ -74,7 +74,7 @@ export async function rpcCall(urls, method, params, { chainId } = {}) {
 const verified = new Set(); // endpoints whose chain id has been checked this run
 
 async function raw(url, method, params) {
-  const r = await fetchJson(url, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params }, timeoutMs: 12000, retries: 0 });
+  const r = await fetchJson(url, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params }, timeoutMs: 12000, retries: 0, service: 'Public RPC' });
   if (!r || r.error || !('result' in r)) throw new Error(r?.error?.message || 'malformed response');
   return r.result;
 }
@@ -107,6 +107,20 @@ export async function readBalances(chain, owner, tokens) {
     } catch { out.push(null); }
   }
   return { native, tokens: out };
+}
+
+// Did a balance really move? Tokens that pay interest by growing (aTokens, stETH and the like) creep
+// up every block; that is not a transfer, and must not send the explorer off to look for one. So a
+// token that grew by less than 0.05% does not count. Any drop, and any change in the native coin, does.
+const CREEP = 2000n; // 1/2000 = 0.05%
+export function moved(key, before, after) {
+  if (before === after) return false;
+  if (key === 'native') return true;
+  try {
+    const a = BigInt(before);
+    const b = BigInt(after);
+    return b < a || a === 0n || (b - a) * CREEP >= a;
+  } catch { return true; }
 }
 
 /**
@@ -145,7 +159,7 @@ export async function syncRpcBalances(db, account, chain) {
   const fp = { native: res.native };
   held.forEach((h, i) => { if (res.tokens[i] != null) fp[h.asset] = res.tokens[i]; });
   const old = kvGet(db, `rpc-fp:${key}`, null);
-  const changed = !!old && Object.keys(fp).some((k) => k in old && old[k] !== fp[k]);
+  const changed = !!old && Object.keys(fp).some((k) => k in old && moved(k, old[k], fp[k]));
   if (!old || JSON.stringify(old) !== JSON.stringify(fp)) kvSet(db, `rpc-fp:${key}`, fp);
   kvSet(db, `rpc-ok:${key}`, nowSec());
   setStatus(db, `evm:${key}`, true, `${rows.filter((r) => r.qty).length} assets (public RPC)`);

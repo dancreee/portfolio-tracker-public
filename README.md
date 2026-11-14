@@ -96,6 +96,10 @@ Figures are estimates for your own tracking, not tax or financial advice.
 ## Refresh rates
 
 Prices every 15 s, Hyperliquid every 10 s, wallet balances every 60 s, history every 5 min.
+Paid or rationed services are used sparingly: Blockscout and Alchemy are only asked after a public RPC
+has seen a balance move (plus a slow safety check), a failed history read waits an hour before it is
+tried again, and Hyperliquid requests share one budget well under its per-minute limit. Settings shows
+how many requests went to each service today and yesterday.
 A portfolio value snapshot is stored every 5 min for the chart.
 
 ## Configuration

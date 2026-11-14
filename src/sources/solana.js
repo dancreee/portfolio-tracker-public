@@ -52,7 +52,7 @@ async function rpc(urls, method, params) {
 
 async function rpcOne(url, method, params) {
   for (let attempt = 0; ; attempt++) {
-    const r = await fetchJson(url, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params }, timeoutMs: 30000 });
+    const r = await fetchJson(url, { method: 'POST', body: { jsonrpc: '2.0', id: 1, method, params }, timeoutMs: 30000, service: 'Public RPC' });
     if (r && !r.error && 'result' in r) return r.result;
     const err = r?.error || { message: 'malformed response' };
     // Some providers report rate limiting inside a 200 response.
