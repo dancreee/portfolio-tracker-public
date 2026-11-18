@@ -93,6 +93,26 @@ History is rebuilt from every transfer, swap and fill, then run through average 
 
 Figures are estimates for your own tracking, not tax or financial advice.
 
+## Importing history from another tracker
+
+If you are moving from another portfolio tracker and can export its snapshots, import them so the
+value chart does not start on the day you installed this one:
+
+    node --experimental-sqlite scripts/import-history.js history.jsonl
+    # optionally leave out a period the old tracker got wrong:
+    #   --skip 2025-06-01T00:00Z,2025-06-08T00:00Z
+
+The file has one JSON object per line: `{"t": time, "v": total USD, "p": [{"sy", "amt", "px", "usd", "cat", "ty"}]}`
+(positions are optional; see `src/history-import.js`). The import:
+
+- fills the value chart for the time before this tracker's own first snapshot;
+- keeps the old tracker's daily prices as a last fallback for cost basis, used only where no market
+  price history exists (shown as "imported history" on the asset's history);
+- takes each asset's category for the Allocation panel's Categories view. Without an import,
+  categories are Stablecoins, Stocks, BTC, ETH, SOL, HYPE and Other.
+
+Running it again replaces the earlier import. Restart the tracker afterwards.
+
 ## Refresh rates
 
 Prices every 15 s, Hyperliquid every 10 s, wallet balances every 60 s, history every 5 min.

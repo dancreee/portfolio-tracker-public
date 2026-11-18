@@ -216,6 +216,12 @@ details.hidden-tokens[open] > summary { margin-bottom: 10px; }
 /* ── allocation / movers ── */
 .stack { display: flex; gap: 2px; height: 6px; overflow: hidden; margin: 2px 0 14px; }
 .stack i { display: block; min-width: 2px; border-radius: 1px; opacity: .9; }
+.alloc-n { font: 11px var(--mono); color: var(--dim); margin: -4px 0 10px; }
+.donut { display: flex; justify-content: center; margin: 2px 0 12px; }
+.donut svg { width: 148px; height: 148px; }
+.donut circle { opacity: .9; }
+.donut .dn-pc { font: 600 20px var(--mono); fill: var(--text); }
+.donut .dn-nm { font: 11px var(--sans); fill: var(--dim); }
 .alloc-row { display: grid; grid-template-columns: 8px minmax(56px, 84px) minmax(20px, 1fr) 50px 64px; align-items: center; gap: 10px; padding: 7px 6px; margin: 0 -6px; font: 13px var(--mono); border-radius: var(--r); font-variant-numeric: tabular-nums; }
 .alloc-row.click, .mover.click { cursor: pointer; }
 .alloc-row.click:hover, .mover.click:hover { background: var(--panel2); }

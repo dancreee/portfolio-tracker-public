@@ -1,5 +1,6 @@
 // Builds the portfolio view: live balances x live prices, merged with cost basis from the ledger.
 import { groupOf } from './config.js';
+import { categoryOf, OTHER } from './categories.js';
 
 const isTrusted = (r) => /^(hl:|cex:|manual:|pearl:)/.test(r.asset) || r.verified || ((r.price ?? 0) > 0 && (r.confidence ?? 0) >= 0.9);
 
@@ -40,7 +41,7 @@ export function buildSummary(db, cfg, ledger) {
     G.priceAt = Math.max(G.priceAt, r.price_at || 0);
     G.holdings.push({
       account: r.account_id, accountLabel: accounts.get(r.account_id)?.label, asset: r.asset, chain: r.chain, symbol: r.symbol, name: r.name,
-      qty: r.qty, price: r.price, change24h: r.change24h, value, priceSource: r.price_source, meta: r.meta ? JSON.parse(r.meta) : null,
+      qty: r.qty, price: r.price, change24h: r.change24h, value, priceSource: r.price_source, priceId: r.price_id, meta: r.meta ? JSON.parse(r.meta) : null,
     });
     total += value;
     change += ch;
@@ -87,6 +88,7 @@ export function buildSummary(db, cfg, ledger) {
       pnlPct: costBasis ? unrealized / costBasis : null,
       trades: (L?.buys || 0) + (L?.sells || 0),
       stable,
+      category: categoryOf(G.group, G.holdings, cfg),
       holdings: G.holdings.sort((a, b) => b.value - a.value),
       priceAt: G.priceAt,
     };
@@ -98,6 +100,16 @@ export function buildSummary(db, cfg, ledger) {
     const acc = byAccount.get(h.account);
     if (acc) { acc.value += h.value; acc.assets++; }
   }
+
+  const byCategory = new Map();
+  for (const A of assets) if (A.value > 0) {
+    const c = byCategory.get(A.category) || { name: A.category, value: 0, assets: 0 };
+    c.value += A.value;
+    c.assets++;
+    byCategory.set(A.category, c);
+  }
+  const categories = [...byCategory.values()].map((c) => ({ ...c, share: total ? c.value / total : 0 }))
+    .sort((a, b) => (a.name === OTHER) - (b.name === OTHER) || b.value - a.value);
 
   const positions = db.prepare('SELECT * FROM positions ORDER BY ABS(value) DESC').all();
   const perpRealized = db.prepare('SELECT COALESCE(SUM(closed_pnl - fee), 0) AS pnl FROM perp_fills').get().pnl;
@@ -117,6 +129,7 @@ export function buildSummary(db, cfg, ledger) {
     realized: assets.reduce((s, a) => s + a.realized, 0),
     perpRealized,
     assets,
+    categories,
     accounts: [...byAccount.values()].sort((a, b) => b.value - a.value),
     positions,
     hidden: hidden.sort((a, b) => b.value - a.value).slice(0, 200),

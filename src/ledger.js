@@ -16,6 +16,7 @@ import { hourBucket } from './util.js';
 
 const MATCH_WINDOW = 3 * 86400;
 const MATCH_TOLERANCE = 0.03; // bridges and CEX withdrawals take fees
+const IMPORT_WINDOW_DAYS = 2; // how far from the event an imported daily price may be
 
 const TRUSTED_PREFIX = /^(hl:|cex:|manual:|pearl:)/;
 
@@ -97,12 +98,20 @@ export async function buildLedger(db, cfg) {
     needs.push({ priceId: i.price_id, ts: i.ts });
   }
   const hist = await historicalPrices(db, needs);
+  // Last resort before today's price: the price an imported portfolio history recorded around that day.
+  const importedStmt = db.prepare('SELECT price FROM imported_prices WHERE grp = ? AND day BETWEEN ? AND ? ORDER BY ABS(day - ?) LIMIT 1');
+  const imported = (i) => {
+    const day = Math.floor(i.ts / 86400);
+    return importedStmt.get(i.group, day - IMPORT_WINDOW_DAYS, day + IMPORT_WINDOW_DAYS, day)?.price ?? null;
+  };
   const unitPrice = (i) => {
     if (i.o_price != null) return { p: i.o_price, src: 'override' };
     if (i.priceUsd != null) return { p: i.priceUsd, src: 'fill' };
     if (cfg.stables.has(i.group)) return { p: 1, src: 'stable' };
     const h = hist.get(`${i.price_id}@${hourBucket(i.ts)}`);
     if (h != null) return { p: h, src: 'historical' };
+    const imp = imported(i);
+    if (imp != null) return { p: imp, src: 'imported history' };
     if (i.cur_price) return { p: i.cur_price, src: 'current (no history)' };
     return { p: null, src: 'unknown' };
   };
@@ -126,7 +135,7 @@ export async function buildLedger(db, cfg) {
       if (!side.length || side.some((l) => l.marketUsd == null)) return null;
       return side.reduce((s, l) => s + l.marketUsd, 0);
     };
-    const reliability = (side) => (side.some((l) => l.priceSrc === 'stable' || l.priceSrc === 'fill' || l.priceSrc === 'override') ? 2 : side.every((l) => l.priceSrc === 'historical') ? 1 : 0);
+    const reliability = (side) => (side.some((l) => l.priceSrc === 'stable' || l.priceSrc === 'fill' || l.priceSrc === 'override') ? 2 : side.every((l) => l.priceSrc === 'historical' || l.priceSrc === 'imported history') ? 1 : 0);
     const bv = sideValue(buys);
     const sv = sideValue(sells);
     let value = null;

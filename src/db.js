@@ -68,10 +68,15 @@ export function openDb(file = process.env.PORTFOLIO_DB || path.join(ROOT, 'data'
     );
     CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
     CREATE TABLE IF NOT EXISTS snapshots (ts INTEGER PRIMARY KEY, total REAL, data TEXT);
+    -- Daily prices from an imported portfolio history (another tracker's export), keyed by asset
+    -- group and UTC day. Used for cost basis only when no market price history is available.
+    CREATE TABLE IF NOT EXISTS imported_prices (grp TEXT, day INTEGER, price REAL, PRIMARY KEY (grp, day));
     CREATE TABLE IF NOT EXISTS source_status (
       source TEXT PRIMARY KEY, ok INTEGER, message TEXT, updated_at INTEGER
     );
   `);
+  // snapshots.src: null for the tracker's own snapshots, 'import' for imported history
+  if (!db.prepare('PRAGMA table_info(snapshots)').all().some((c) => c.name === 'src')) db.exec('ALTER TABLE snapshots ADD COLUMN src TEXT');
   return db;
 }
 

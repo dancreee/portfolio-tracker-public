@@ -273,7 +273,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, db.prepare('SELECT MAX(ts) AS ts, total FROM snapshots WHERE ts >= ? GROUP BY ts / ? ORDER BY ts').all(since, bucket));
     }
     if (p === '/api/history/reset' && req.method === 'POST') {
-      db.prepare('DELETE FROM snapshots').run();
+      db.prepare('DELETE FROM snapshots WHERE src IS NULL').run(); // imported history stays
       return send(res, 200, { ok: true });
     }
     if (p === '/api/asset') {

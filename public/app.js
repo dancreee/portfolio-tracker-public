@@ -531,10 +531,21 @@ function drawChart() {
     const d = new Date(t);
     g += `<text class="ax" text-anchor="middle" x="${x(t).toFixed(1)}" y="${H - 6}">${esc(span <= 2 * 86400e3 ? dfTime.format(d) : dfDay.format(d))}</text>`;
   }
-  let d = '';
-  for (let i = 0; i < pts.length; i++) d += `${i ? 'L' : 'M'}${x(pts[i].t).toFixed(1)} ${y(pts[i].v).toFixed(1)}`;
+  // The line breaks where there is no data for a long stretch, instead of drawing a straight guess across it.
+  const gap = Math.max(5 * 86400e3, span / 40);
   const base = H - m.b;
-  const area = `${d}L${x(t1).toFixed(1)} ${base}L${x(t0).toFixed(1)} ${base}Z`;
+  let d = '';
+  let area = '';
+  let from = 0;
+  for (let i = 0; i <= pts.length; i++) {
+    if (i < pts.length && (i === from || pts[i].t - pts[i - 1].t <= gap)) continue;
+    let seg = '';
+    for (let j = from; j < i; j++) seg += `${j === from ? 'M' : 'L'}${x(pts[j].t).toFixed(1)} ${y(pts[j].v).toFixed(1)}`;
+    if (i - from === 1) seg += 'h0.1'; // a lone point still shows
+    d += seg;
+    area += `${seg}L${x(pts[i - 1].t).toFixed(1)} ${base}L${x(pts[from].t).toFixed(1)} ${base}Z`;
+    from = i;
+  }
   const lx = x(t1).toFixed(1);
   const ly = y(last).toFixed(1);
   box.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" role="img" aria-label="Portfolio value, ${esc(RANGE_TEXT[chart.range])}">
@@ -626,6 +637,35 @@ function assignSeries(groups) {
   }
 }
 
+const allocBy = () => (prefs.get('allocBy', 'asset') === 'category' ? 'category' : 'asset');
+
+// Categories take the colour slots biggest first; "Other" is always grey and listed last.
+function categorySegs(cats) {
+  const named = cats.filter((c) => c.name !== 'Other');
+  const head = named.slice(0, SERIES.length);
+  const tail = [...named.slice(SERIES.length), ...cats.filter((c) => c.name === 'Other')];
+  const segs = head.map((c, i) => ({ label: c.name, share: c.share, value: c.value, color: SERIES[i] }));
+  if (tail.length) segs.push({ label: 'Other', share: tail.reduce((t, c) => t + c.share, 0), value: tail.reduce((t, c) => t + c.value, 0), color: OTHER_COLOR });
+  return segs;
+}
+
+function donut(segs) {
+  const R = 54;
+  const C = 2 * Math.PI * R;
+  const sum = segs.reduce((t, x) => t + x.share, 0) || 1;
+  const gap = segs.length > 1 ? 2 : 0;
+  let at = 0;
+  const arcs = segs.map((x) => {
+    const len = (x.share / sum) * C;
+    const arc = `<circle r="${R}" cx="70" cy="70" fill="none" stroke="${x.color}" stroke-width="16" stroke-dasharray="${Math.max(len - gap, 0.5).toFixed(2)} ${C.toFixed(2)}" stroke-dashoffset="${(-at).toFixed(2)}"><title>${esc(x.label)} ${pct(x.share, { sign: false, dp: 1 })}</title></circle>`;
+    at += len;
+    return arc;
+  }).join('');
+  const lead = segs[0];
+  return `<div class="donut"><svg viewBox="0 0 140 140" role="img" aria-label="Allocation by category"><g transform="rotate(-90 70 70)">${arcs}</g>
+    ${lead ? `<text x="70" y="66" text-anchor="middle" class="dn-pc">${pct(lead.share, { sign: false, dp: 0 })}</text><text x="70" y="84" text-anchor="middle" class="dn-nm">${esc(clip(lead.label, 12))}</text>` : ''}</svg></div>`;
+}
+
 function tile(label, value, sub = '', cls = '') {
   return `<div class="tile"><label>${label}</label><b class="${cls}">${value}</b><small>${sub}</small></div>`;
 }
@@ -643,7 +683,9 @@ const overview = {
             <div class="chart-head" id="chDelta"></div>
             <div id="chart" class="chartbox"></div>
           </div>
-          <div class="panel"><h3><span>Allocation</span><span id="allocN"></span></h3><div id="alloc"></div></div>
+          <div class="panel"><h3><span>Allocation</span>
+            <span class="seg" id="allocBy">${['asset', 'category'].map((m) => `<button type="button" data-by="${m}" class="${m === allocBy() ? 'on' : ''}">${m === 'asset' ? 'Assets' : 'Categories'}</button>`).join('')}</span></h3>
+            <div class="alloc-n" id="allocN"></div><div id="alloc"></div></div>
         </div>
         <div class="grid">
           <div class="panel">
@@ -663,6 +705,13 @@ const overview = {
     });
     $('#movers').addEventListener('click', (e) => { const r = e.target.closest('[data-group]'); if (r) openAsset(r.dataset.group); });
     $('#alloc').addEventListener('click', (e) => { const r = e.target.closest('[data-group]'); if (r) openAsset(r.dataset.group); });
+    $('#allocBy').addEventListener('click', (e) => {
+      const b = e.target.closest('button[data-by]');
+      if (!b || b.dataset.by === allocBy()) return;
+      prefs.set('allocBy', b.dataset.by);
+      for (const x of $$('#allocBy button')) x.classList.toggle('on', x.dataset.by === allocBy());
+      if (S.summary) this.update(S.summary);
+    });
     $('#ovMore').addEventListener('click', (e) => {
       if (e.target.closest('button')) { S.showAllOverview = !S.showAllOverview; this.update(S.summary); }
     });
@@ -689,17 +738,26 @@ const overview = {
     // chart: live point + periodic history refresh
     if (Date.now() - chart.fetchedAt > 5 * 60_000 && !chart.loading) loadHistory(); else drawChart();
 
-    // allocation
+    // allocation, by asset (bar) or by category (donut)
     const ranked = s.assets.filter((a) => a.value > 0);
-    const head = ranked.slice(0, SERIES.length);
-    const rest = ranked.slice(SERIES.length);
-    assignSeries(head.map((a) => a.group));
-    const restShare = rest.reduce((t, a) => t + a.share, 0);
-    const restValue = rest.reduce((t, a) => t + a.value, 0);
-    const segs = head.map((a) => ({ label: a.group, share: a.share, value: a.value, color: seriesOf.get(a.group), group: a.group }));
-    if (rest.length) segs.push({ label: `Other (${rest.length})`, share: restShare, value: restValue, color: OTHER_COLOR });
-    setHTML($('#allocN'), `${ranked.length} assets`);
-    setHTML($('#alloc'), segs.length ? `<div class="stack" role="img" aria-label="Allocation by asset">${segs.map((x) => `<i style="flex:${Math.max(x.share, 0.004).toFixed(4)};background:${x.color}" title="${esc(x.label)} ${pct(x.share, { sign: false, dp: 1 })}"></i>`).join('')}</div>
+    let segs;
+    let allocTop;
+    if (allocBy() === 'category') {
+      segs = categorySegs(s.categories || []);
+      setHTML($('#allocN'), `${(s.categories || []).length} categories`);
+      allocTop = donut(segs);
+    } else {
+      const head = ranked.slice(0, SERIES.length);
+      const rest = ranked.slice(SERIES.length);
+      assignSeries(head.map((a) => a.group));
+      const restShare = rest.reduce((t, a) => t + a.share, 0);
+      const restValue = rest.reduce((t, a) => t + a.value, 0);
+      segs = head.map((a) => ({ label: a.group, share: a.share, value: a.value, color: seriesOf.get(a.group), group: a.group }));
+      if (rest.length) segs.push({ label: `Other (${rest.length})`, share: restShare, value: restValue, color: OTHER_COLOR });
+      setHTML($('#allocN'), `${ranked.length} assets`);
+      allocTop = `<div class="stack" role="img" aria-label="Allocation by asset">${segs.map((x) => `<i style="flex:${Math.max(x.share, 0.004).toFixed(4)};background:${x.color}" title="${esc(x.label)} ${pct(x.share, { sign: false, dp: 1 })}"></i>`).join('')}</div>`;
+    }
+    setHTML($('#alloc'), segs.length ? `${allocTop}
       <div class="alloc-list">${segs.map((x) => `<div class="alloc-row${x.group ? ' click' : ''}"${x.group ? ` data-group="${esc(x.group)}"` : ''}>
         <span class="sw" style="background:${x.color}"></span><span class="nm">${esc(clip(x.label, 18))}</span>
         <span class="ab"><i style="width:${(x.share * 100).toFixed(2)}%;background:${x.color}"></i></span>
