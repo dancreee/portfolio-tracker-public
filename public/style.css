@@ -198,8 +198,9 @@ details.hidden-tokens[open] > summary { margin-bottom: 10px; }
 /* ── chart ── */
 .chart-head { font: 13px var(--mono); min-height: 20px; margin: -4px 0 8px; font-variant-numeric: tabular-nums; }
 .chart-head b { font-weight: 400; }
-.chartbox { position: relative; height: 250px; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: crosshair; }
-.chartbox svg { display: block; overflow: visible; }
+.chart-panel { display: flex; flex-direction: column; }
+.chartbox { position: relative; flex: 1 1 auto; min-height: 250px; touch-action: pan-y; user-select: none; -webkit-user-select: none; cursor: crosshair; }
+.chartbox > svg { position: absolute; inset: 0; display: block; overflow: visible; } /* out of flow, so the box sizes the chart and not the reverse */
 .chartbox .grid { stroke: var(--sep); stroke-width: 1; }
 .chartbox .base { stroke: var(--line); stroke-width: 1; }
 .chartbox .ax { fill: var(--dim); font: 11px var(--mono); }
@@ -208,7 +209,7 @@ details.hidden-tokens[open] > summary { margin-bottom: 10px; }
 .chartbox .pulse { display: none; }
 .tip { position: absolute; pointer-events: none; background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--r); padding: 8px 11px; font: 12px var(--mono); white-space: nowrap; display: flex; flex-direction: column; gap: 2px; z-index: 2; font-variant-numeric: tabular-nums; }
 .tip b { font-size: 14px; font-weight: 400; }
-.chart-empty { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-align: center; padding: 10px 20px; cursor: default; }
+.chart-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--dim); text-align: center; padding: 10px 20px; cursor: default; }
 .chart-empty b { color: var(--text); font-weight: 500; }
 .chart-empty span { max-width: 420px; font-size: 13px; }
 .ce-art { width: 120px; height: 40px; fill: none; stroke: var(--line2); stroke-width: 1.5; stroke-linecap: round; stroke-dasharray: 4 5; margin-bottom: 6px; }
@@ -429,7 +430,7 @@ details.adv[open] summary { margin-bottom: 8px; }
   .toolbar .seg { order: 3; }
   .toolbar #asCount { order: 4; }
   .sub-hold th, .sub-hold td, .acc-detail th, .acc-detail td { padding: 4px 8px; }
-  .chartbox { height: 210px; }
+  .chartbox { min-height: 210px; }
   .sticky1 th:first-child, .sticky1 td:first-child { position: sticky; left: 0; background: var(--panel); z-index: 1; box-shadow: 1px 0 0 var(--sep); }
   .sticky1 tfoot td:first-child { background: var(--panel2); }
   .sticky1 tr.click:hover td:first-child { background: var(--panel2); }

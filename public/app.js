@@ -603,9 +603,11 @@ function mountChart() {
   if ('ResizeObserver' in window) {
     let raf = 0;
     let lastW = 0;
+    let lastH = 0;
     chart.ro = new ResizeObserver(() => {
-      if (box.clientWidth === lastW) return;
+      if (box.clientWidth === lastW && box.clientHeight === lastH) return;
       lastW = box.clientWidth;
+      lastH = box.clientHeight;
       cancelAnimationFrame(raf);
       raf = requestAnimationFrame(drawChart);
     });
