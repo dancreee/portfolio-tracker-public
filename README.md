@@ -93,6 +93,23 @@ History is rebuilt from every transfer, swap and fill, then run through average 
 
 Figures are estimates for your own tracking, not tax or financial advice.
 
+## Trade plans (optional)
+
+Switch on **Trade plans** in Settings to keep one plan per asset: thesis, what would prove it
+wrong, entry, stop, target and optional bear / base / bull notes. The entry is filled in from your
+average cost. Every save is kept as a version and the newest one is the plan.
+
+- Assets without a plan get a small "no plan" badge. A buy or sell made after the plan was last
+  updated asks you to review it.
+- Once an asset is sold completely, the trade moves to the **Closed** tab on the Assets page with
+  its dates, cost basis, proceeds, realised PnL, the plan as it stood and an exit note. Buying the
+  asset back starts a new plan.
+- Closed trades with a cost basis under $100 are left off the Closed tab; the amount is set in
+  Settings. Only trades closed after you switched trade plans on ask for an exit note.
+
+Stop and target are notes: nothing is traded or alerted. Switching the feature off hides it and
+keeps everything you wrote.
+
 ## Importing history from another tracker
 
 If you are moving from another portfolio tracker and can export its snapshots, import them so the

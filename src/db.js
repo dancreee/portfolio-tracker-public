@@ -71,6 +71,16 @@ export function openDb(file = process.env.PORTFOLIO_DB || path.join(ROOT, 'data'
     -- Daily prices from an imported portfolio history (another tracker's export), keyed by asset
     -- group and UTC day. Used for cost basis only when no market price history is available.
     CREATE TABLE IF NOT EXISTS imported_prices (grp TEXT, day INTEGER, price REAL, PRIMARY KEY (grp, day));
+    -- Trade plans: every save is a new row; the newest row for an asset group is its plan.
+    CREATE TABLE IF NOT EXISTS plans (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, grp TEXT NOT NULL, created_at INTEGER NOT NULL,
+      thesis TEXT, invalidation TEXT, entry TEXT, stop REAL, target REAL, bear TEXT, base TEXT, bull TEXT
+    );
+    CREATE INDEX IF NOT EXISTS plans_grp ON plans(grp, created_at);
+    -- Notes on a fully exited trade, keyed by asset group and the time of the closing sale.
+    CREATE TABLE IF NOT EXISTS trade_notes (
+      grp TEXT, closed_at INTEGER, exit_note TEXT, lesson TEXT, updated_at INTEGER, PRIMARY KEY (grp, closed_at)
+    );
     CREATE TABLE IF NOT EXISTS source_status (
       source TEXT PRIMARY KEY, ok INTEGER, message TEXT, updated_at INTEGER
     );

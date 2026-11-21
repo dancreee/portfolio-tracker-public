@@ -16,6 +16,7 @@ import { syncManual } from './sources/manual.js';
 import { refreshPrices, refreshPriceRefs, refreshTokenLists, markVerifiedFromLists } from './prices.js';
 import { buildLedger } from './ledger.js';
 import { buildSummary } from './portfolio.js';
+import { plansEnabled, plansMinUsd, plansOverview, planFor, savePlan, markReviewed, closedTrades, saveTradeNote } from './plans.js';
 
 const PORT = Number(process.env.PORT || 4321);
 // Binds to localhost only by default. To serve it over a private network (e.g. Tailscale),
@@ -51,9 +52,21 @@ function saveUsage() {
 }
 const usageView = () => ({ today: usage.day === utcDay() ? usage.counts : {}, yesterday: kvGet(db, `usage:${utcDay(1)}`, {}) });
 
+// The summary plus what sits on top of it: request counts and, when trade plans are switched on,
+// each asset's plan state ('none' | 'ok' | 'review') and the number of closed trades.
+function fullSummary() {
+  const s = buildSummary(db, cfg, ledger);
+  s.usage = usageView();
+  s.plans = null;
+  if (plansEnabled(cfg)) {
+    const o = plansOverview(db, cfg, ledger);
+    for (const a of s.assets) a.plan = a.stable ? null : o.state.get(a.group) || 'none';
+    s.plans = { closed: o.closed };
+  }
+  return s;
+}
 function publish() {
-  summary = buildSummary(db, cfg, ledger);
-  summary.usage = usageView();
+  summary = fullSummary();
   const msg = `data: ${JSON.stringify(summary)}\n\n`;
   for (const res of clients) res.write(msg);
 }
@@ -153,6 +166,7 @@ function schedule() {
 
 function reloadConfig() {
   cfg = loadConfig(db);
+  markPlansStart();
   // drop balances for accounts that no longer exist
   const ids = cfg.accounts.map((a) => a.id);
   const all = db.prepare('SELECT DISTINCT account_id FROM balances').all().map((r) => r.account_id);
@@ -263,7 +277,7 @@ const server = http.createServer(async (req, res) => {
       req.on('close', () => clients.delete(res));
       return;
     }
-    if (p === '/api/summary') return send(res, 200, summary || { ...buildSummary(db, cfg, ledger), usage: usageView() });
+    if (p === '/api/summary') return send(res, 200, summary || fullSummary());
     if (p === '/api/history') {
       const d = url.searchParams.get('days');
       const since = d === 'all' ? 0 : nowSec() - Number(d || 30) * 86400;
@@ -285,7 +299,7 @@ const server = http.createServer(async (req, res) => {
 
     if (p === '/api/accounts' && req.method === 'GET') {
       return send(res, 200, { accounts: db.prepare('SELECT * FROM accounts ORDER BY sort, label').all().map(publicAccount),
-        chains: Object.values(cfg.chains).map((c) => ({ name: c.name, default: autoChains(cfg.chains).includes(c.name) })), settings: { blockscoutKey: mask(cfg.settings.blockscoutKey), alchemyKey: mask(cfg.settings.alchemyKey), refresh: cfg.refresh, rpcs: rpcSettings() } });
+        chains: Object.values(cfg.chains).map((c) => ({ name: c.name, default: autoChains(cfg.chains).includes(c.name) })), settings: { blockscoutKey: mask(cfg.settings.blockscoutKey), alchemyKey: mask(cfg.settings.alchemyKey), refresh: cfg.refresh, rpcs: rpcSettings(), plans: plansEnabled(cfg), plansMinUsd: plansMinUsd(cfg) } });
     }
     if (p === '/api/accounts' && req.method === 'POST') {
       const id = saveAccount(await readBody(req));
@@ -309,6 +323,14 @@ const server = http.createServer(async (req, res) => {
       if (b.rpcs && typeof b.rpcs === 'object') saveRpcs(b.rpcs);
       if (b.refresh) kvSet(db, 'setting:refresh', userRefresh(b.refresh));
       if (b.aliases) kvSet(db, 'setting:aliases', b.aliases);
+      if (typeof b.plans === 'boolean') kvSet(db, 'setting:plans', b.plans);
+      if (b.plansMinUsd != null) {
+        const n = Number(b.plansMinUsd);
+        if (!Number.isFinite(n) || n < 0) throw new Error('Smallest closed trade to show must be 0 or more');
+        kvSet(db, 'setting:plansMinUsd', n);
+      }
+      // display settings only: no need to re-read every account
+      if (Object.keys(b).every((k) => k === 'plans' || k === 'plansMinUsd')) { cfg = loadConfig(db); markPlansStart(); publish(); return send(res, 200, { ok: true }); }
       reloadConfig();
       return send(res, 200, { ok: true });
     }
@@ -319,6 +341,26 @@ const server = http.createServer(async (req, res) => {
       else db.prepare('INSERT OR REPLACE INTO overrides (event_id, class, price_usd, note) VALUES (?, ?, ?, ?)').run(b.eventId, b.class || null, b.price == null || b.price === '' ? null : Number(b.price), b.note || null);
       ledger = await buildLedger(db, cfg);
       publish();
+      return send(res, 200, { ok: true });
+    }
+    // Trade plans (switched on in Settings)
+    if ((p.startsWith('/api/plan') || p.startsWith('/api/closed')) && !plansEnabled(cfg)) return send(res, 404, { error: 'Trade plans are switched off in Settings' });
+    if (p === '/api/plan' && req.method === 'GET') return send(res, 200, planFor(db, cfg, ledger, url.searchParams.get('group') || ''));
+    if (p === '/api/plan' && req.method === 'POST') {
+      const out = savePlan(db, cfg, ledger, await readBody(req));
+      publish();
+      return send(res, 200, out);
+    }
+    if (p === '/api/plan/reviewed' && req.method === 'POST') {
+      const { group } = await readBody(req);
+      if (!group) return send(res, 400, { error: 'group required' });
+      markReviewed(db, String(group));
+      publish();
+      return send(res, 200, planFor(db, cfg, ledger, String(group)));
+    }
+    if (p === '/api/closed' && req.method === 'GET') return send(res, 200, closedTrades(db, cfg, ledger));
+    if (p === '/api/closed/note' && req.method === 'POST') {
+      saveTradeNote(db, cfg, ledger, await readBody(req));
       return send(res, 200, { ok: true });
     }
     if (p.startsWith('/api/')) return send(res, 404, { error: 'not found' });
@@ -333,6 +375,14 @@ const server = http.createServer(async (req, res) => {
     send(res, 400, { error: e.message });
   }
 });
+
+// Remember when trade plans were first switched on: only trades closed from then on ask for an exit note.
+function markPlansStart() {
+  if (!plansEnabled(cfg) || cfg.settings.plansSince) return;
+  kvSet(db, 'setting:plansSince', nowSec());
+  cfg = loadConfig(db);
+}
+markPlansStart();
 
 // First run: import accounts from accounts.seed.json (gitignored) if the database has none.
 function importSeed() {

@@ -836,12 +836,20 @@ const assets = {
   mount(el) {
     el.innerHTML = `
       <div class="toolbar">
+        <span class="seg" id="asTab" role="group" aria-label="Holding or closed trades" hidden></span>
         <input id="asSearch" type="search" placeholder="Filter assets…" autocomplete="off" spellcheck="false" value="${esc(S.search)}" aria-label="Filter assets">
         <label class="check"><input type="checkbox" id="asSmall" ${S.hideSmall ? 'checked' : ''}> Hide balances under $1</label>
         <span class="seg mo" id="asPeriod" role="group" aria-label="Change period">${PERIODS.map((x) => `<button type="button" data-period="${x}">${x}</button>`).join('')}</span>
         <span class="dim grow" id="asCount"></span>
       </div>
-      <div class="panel flush">
+      <div class="panel flush" id="closedBox" hidden>
+        <div class="scroll"><table id="clTable" class="sticky1 tbl-assets tbl-closed">
+          <thead><tr><th>Asset</th><th class="hm">Opened</th><th class="hm">Closed</th><th class="hm">Held</th><th class="hm">Cost basis</th><th>Proceeds</th><th>Realised PnL</th><th class="hm left">Exit note</th></tr></thead>
+          <tbody></tbody>
+          <tfoot><tr id="clFoot"></tr></tfoot>
+        </table></div>
+      </div>
+      <div class="panel flush" id="asMain">
         <div class="scroll"><table id="asTable" class="sticky1 tbl-assets">
           <thead><tr>${ASSET_COLS.map(([k, label, c]) => `<th class="sort ${c}" data-sort="${k}" tabindex="0">${label}</th>`).join('')}</tr></thead>
           <tbody></tbody>
@@ -875,10 +883,37 @@ const assets = {
       const th = e.target.closest('th.sort');
       if (th && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); sortBy(th); }
     });
+    $('#asTab').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-tab]');
+      if (!b || b.dataset.tab === P.tab) return;
+      P.tab = b.dataset.tab;
+      P.closedErr = null;
+      if (P.tab === 'closed') P.closedFor = null; // always re-read when the tab is opened
+      this.update(S.summary);
+    });
+    $('#clTable tbody').addEventListener('click', (e) => {
+      if (e.target.closest('[data-note-cancel]')) { P.noteEdit = null; this.update(S.summary); return; }
+      const edit = e.target.closest('[data-note-edit]');
+      if (edit) {
+        P.noteEdit = edit.dataset.noteEdit;
+        P.open.add(P.noteEdit);
+        this.update(S.summary);
+        $('#nf_exit')?.focus({ preventScroll: true });
+        return;
+      }
+      if (e.target.closest('.closed-plan')) return;
+      const tr = e.target.closest('tr.click');
+      if (!tr) return;
+      const k = tr.dataset.key;
+      if (P.open.has(k)) { P.open.delete(k); if (P.noteEdit === k) P.noteEdit = null; } else P.open.add(k);
+      this.update(S.summary);
+    });
+    $('#clTable tbody').addEventListener('submit', (e) => { e.preventDefault(); if (e.target.matches('.note-form')) saveNote(e.target); });
     $('#asTable tbody').addEventListener('click', (e) => {
       const chev = e.target.closest('.chev');
       const tr = e.target.closest('tr');
       if (!tr) return;
+      if (e.target.closest('.planbadge') && tr.classList.contains('click')) { P.wantForm = true; openAsset(tr.dataset.key); return; }
       if (chev) {
         const k = tr.dataset.key;
         if (S.expanded.has(k)) S.expanded.delete(k); else S.expanded.add(k);
@@ -890,6 +925,17 @@ const assets = {
   },
   update(s) {
     if (!s) return;
+    const on = !!s.plans;
+    if (!on) P.tab = 'holding';
+    const closedTab = P.tab === 'closed';
+    $('#asTab').hidden = !on;
+    if (on) setHTML($('#asTab'), `<button type="button" data-tab="holding" class="${closedTab ? '' : 'on'}">Holding</button><button type="button" data-tab="closed" class="${closedTab ? 'on' : ''}">Closed <span class="n">${s.plans.closed}</span></button>`);
+    $('#asMain').hidden = closedTab;
+    $('#closedBox').hidden = !closedTab;
+    $('#asSmall').closest('label').hidden = closedTab;
+    $('#asPeriod').hidden = closedTab;
+    $('#asSearch').placeholder = closedTab ? 'Filter closed trades…' : 'Filter assets…';
+    if (closedTab) { $('#hiddenBox').hidden = true; renderClosed(s); return; }
     if (!PERIODS.includes(S.period)) S.period = '24h';
     const chgKey = `change${S.period}`;
     for (const b of $$('#asPeriod button')) b.classList.toggle('on', b.dataset.period === S.period);
@@ -913,7 +959,7 @@ const assets = {
         key: a.group,
         cls: `click${open ? ' open' : ''}`,
         cells: [
-          { h: `<div class="asset"><button type="button" class="chev" aria-label="${open ? 'Collapse' : 'Expand'} holdings" aria-expanded="${open}"></button>${avatar(a.group)}<div class="asset-t"><span class="sym">${esc(clip(a.group, 16))}</span><small class="dk">${a.holdings.length} holding${a.holdings.length === 1 ? '' : 's'}${a.trades ? ` · ${a.trades} trades` : ''}</small><small class="mo">${qty(a.qty)}</small></div></div>` },
+          { h: `<div class="asset"><button type="button" class="chev" aria-label="${open ? 'Collapse' : 'Expand'} holdings" aria-expanded="${open}"></button>${avatar(a.group)}<div class="asset-t"><span class="symrow"><span class="sym">${esc(clip(a.group, 16))}</span>${planBadge(a.plan)}</span><small class="dk">${a.holdings.length} holding${a.holdings.length === 1 ? '' : 's'}${a.trades ? ` · ${a.trades} trades` : ''}</small><small class="mo">${qty(a.qty)}</small></div></div>` },
           { h: qty(a.qty), c: 'hm' },
           { h: priceH(a.price), v: a.price },
           { h: pctCell(a.change24h), c: 'hm' },
@@ -987,6 +1033,7 @@ function showDrawer(group) {
     </div>
     <div class="kpis" id="drKpis"></div>
     <div id="drWarn"></div>
+    <div id="drPlan"></div>
     <div class="panel">
       <h3><span>Where it is held</span><span id="drHoldN"></span></h3>
       <div class="scroll"><table id="drHold"><thead><tr><th>Account</th><th class="hm">Chain</th><th class="hm">Token</th><th>Amount</th><th class="hm">Price</th><th>Value</th><th class="hm">Share</th></tr></thead><tbody></tbody></table></div>
@@ -1005,6 +1052,7 @@ function showDrawer(group) {
 }
 function hideDrawer() {
   if (!D.group) return;
+  resetPlan();
   D.group = null;
   D.data = null;
   D.seq++;
@@ -1048,6 +1096,7 @@ const PRICE_SRC_NOTE = {
 function updateDrawer() {
   const group = D.group;
   if (!group || !$('#drKpis')) return;
+  syncPlan();
   const s = S.summary;
   const a = s?.assets.find((x) => x.group === group);
   const L = D.data;
@@ -1170,6 +1219,8 @@ drawerEl.addEventListener('click', (e) => {
   if (e.target === drawerEl || e.target.closest('#drClose')) { closeAsset(); return; }
   const copy = e.target.closest('[data-copy]');
   if (copy) { copyText(copy.dataset.copy); return; }
+  const act = e.target.closest('[data-plan-act]');
+  if (act) { planAction(act.dataset.planAct); return; }
   const f = e.target.closest('#drFilter button');
   if (f) {
     D.filter = f.dataset.f;
@@ -1197,7 +1248,10 @@ drawerEl.addEventListener('change', (e) => {
     saveOverride(t.dataset.ev, { price: n });
   }
 });
+drawerEl.addEventListener('submit', (e) => { e.preventDefault(); if (e.target.id === 'planForm') submitPlan(e.target); });
 drawerEl.addEventListener('keydown', (e) => {
+  // Escape must not close the asset view and throw away a half-written plan
+  if (e.key === 'Escape' && e.target.closest?.('#planForm')) { e.preventDefault(); return; }
   if (!e.target.matches?.('input.px')) return;
   if (e.key === 'Enter') e.target.blur();
   if (e.key === 'Escape') {
@@ -1211,6 +1265,258 @@ drawerEl.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && D.group && !e.defaultPrevented) closeAsset();
 });
+
+// ───────────────────────── trade plans ─────────────────────────
+// Optional (Settings → Trade plans). One living plan per asset in the asset view, a badge on the
+// Assets list where a plan is missing or a trade came after it, and a Closed tab of fully exited trades.
+const P = {
+  tab: 'holding', closed: null, closedMeta: null, closedFor: null, closedErr: null, closedLoading: false, open: new Set(), noteEdit: null,
+  loadedFor: null, stateSeen: null, data: null, error: null, editing: false, showVersions: false, wantForm: false,
+};
+const plansOn = () => !!S.summary?.plans;
+const dateOnly = (ts) => dfDate.format(new Date(ts * 1000));
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const multiline = (t) => esc(t).replace(/\n/g, '<br>');
+/** Planned entry as typed; a bare number is shown as a price. */
+const entryText = (t) => { const n = parseNum(t); return t && Number.isFinite(n) && n > 0 ? price(n) : esc(t); };
+function planBadge(state) {
+  if (state === 'none') return '<span class="planbadge" title="No plan written for this asset yet">no plan</span>';
+  if (state === 'review') return '<span class="planbadge review" title="You traded this after the plan was last updated"><span class="dk">review </span>plan</span>';
+  return '';
+}
+
+function planLevels(a, pl) {
+  const px = a?.price;
+  const cost = a?.avgCost;
+  const rel = (v) => (isNum(v) && px > 0 ? `<small class="${pnlCls(v - px)}">${pct(v / px - 1)}</small>` : '<small></small>');
+  let h = '';
+  if (isNum(pl.target)) h += `<div class="lv"><span>Target</span><b>${price(pl.target)}</b>${rel(pl.target)}</div>`;
+  if (px > 0) h += `<div class="lv now"><span>Price</span><b>${price(px)}</b><small>now</small></div>`;
+  h += `<div class="lv"><span>Entry</span><b>${pl.entry ? entryText(pl.entry) : '<span class="dim">—</span>'}</b><small>${isNum(cost) ? `avg cost ${price(cost)}` : ''}</small></div>`;
+  if (isNum(pl.stop)) h += `<div class="lv"><span>Stop</span><b>${price(pl.stop)}</b>${rel(pl.stop)}</div>`;
+  const { stop, target } = pl;
+  if (isNum(stop) && isNum(target) && target > stop && px > 0) {
+    const at = (v) => clamp01((v - stop) / (target - stop)) * 100;
+    const edge = (p) => (p < 9 ? ' l' : p > 91 ? ' r' : '');
+    const top = (p, text, cls = '') => `<em class="t${edge(p)}${cls}" style="${p < 9 ? 'left:0' : p > 91 ? 'right:0' : `left:${p.toFixed(1)}%`}">${text}</em>`;
+    const pp = at(px);
+    const hasCost = isNum(cost) && cost > stop && cost < target;
+    const cp = hasCost ? at(cost) : 0;
+    h += `<div class="range">${hasCost ? `<div class="loss" style="width:${cp.toFixed(1)}%"></div><i class="tick" style="left:${cp.toFixed(1)}%"></i>` : ''}<i class="dot" style="left:${pp.toFixed(1)}%"></i>`
+      + `${hasCost && Math.abs(cp - pp) > 16 ? top(cp, `cost ${price(cost)}`) : ''}${top(pp, `now ${price(px)}`, ' on')}`
+      + `<em class="l">stop ${price(stop)}</em><em class="r">target ${price(target)}</em></div>`;
+  }
+  const bits = [];
+  const sized = isNum(cost) && a?.qty > 0;
+  if (sized && isNum(stop)) bits.push(`<span>At stop <b class="${pnlCls(stop - cost)}">${usd(a.qty * (stop - cost), { sign: true, dp: 0 })}</b></span>`);
+  if (sized && isNum(target)) bits.push(`<span>At target <b class="${pnlCls(target - cost)}">${usd(a.qty * (target - cost), { sign: true, dp: 0 })}</b></span>`);
+  if (isNum(stop) && isNum(target) && px > stop && target > px) bits.push(`<span>Reward : risk <b>${((target - px) / (px - stop)).toFixed(1)} : 1</b></span>`);
+  if (bits.length) h += `<div class="rr">${bits.join('')}</div>`;
+  return h;
+}
+const scenariosHtml = (pl) => (pl.bear || pl.base || pl.bull ? `<div class="scen">${[['bear', 'Bear', 'down'], ['base', 'Base', 'mid'], ['bull', 'Bull', 'up']]
+  .map(([k, label, c]) => `<div><label><i class="${c}"></i>${label}</label>${pl[k] ? multiline(pl[k]) : '<span class="dim">—</span>'}</div>`).join('')}</div>` : '');
+const planTextHtml = (pl) => `${pl.thesis ? `<label>Thesis</label><p>${multiline(pl.thesis)}</p>` : ''}${pl.invalidation ? `<label>Invalidation · what proves me wrong</label><p>${multiline(pl.invalidation)}</p>` : ''}`
+  || '<p class="dim">No thesis written.</p>';
+const levelLine = (pl) => [pl.entry && `entry ${entryText(pl.entry)}`, isNum(pl.stop) && `stop ${price(pl.stop)}`, isNum(pl.target) && `target ${price(pl.target)}`].filter(Boolean).join(' · ');
+const oldVersionsHtml = (versions) => versions.slice(1).map((v, i) => `<div class="ver"><div class="ver-h">Version ${versions.length - 1 - i} · ${dateOnly(v.at)}${levelLine(v) ? ` · ${levelLine(v)}` : ''}</div>`
+  + `${v.thesis ? `<p><span class="dim">Thesis</span> ${multiline(v.thesis)}</p>` : ''}${v.invalidation ? `<p><span class="dim">Invalidation</span> ${multiline(v.invalidation)}</p>` : ''}`
+  + `${['bear', 'base', 'bull'].filter((k) => v[k]).map((k) => `<p><span class="dim">${k[0].toUpperCase() + k.slice(1)}</span> ${multiline(v[k])}</p>`).join('')}</div>`).join('');
+
+function planCardHtml(a, d, group) {
+  const pl = d.plan;
+  if (!pl) {
+    return `<div class="panel plan"><h3><span>Plan</span></h3><div class="plan-empty"><p>No plan for ${esc(clip(group, 16))} yet. Write down why you hold it and what would make you sell, so the decision is already made when it moves.</p>`
+      + '<button type="button" class="primary" data-plan-act="edit">Add plan</button></div></div>';
+  }
+  const r = d.review;
+  const n = d.versions.length;
+  return `${r ? `<div class="callout warn plan-review"><div><b>You ${r.cls === 'buy' ? 'bought' : 'sold'} ${qty(r.qty)} ${esc(clip(group, 12))}${isNum(r.unitPrice) ? ` at ${price(r.unitPrice)}` : ''} ${ago(r.ts)}.</b> The plan below was written before that. Does it still hold, or does this change your levels?</div>`
+    + '<button type="button" class="small" data-plan-act="reviewed">Still on plan</button><button type="button" class="small primary" data-plan-act="edit">Update plan</button></div>' : ''}`
+    + `<div class="panel plan"><h3><span>Plan</span><span class="meta">Updated ${ago(pl.at)}${n > 1 ? ` · <button type="button" class="link" data-plan-act="versions">${n} versions</button>` : ''}<button type="button" class="small" data-plan-act="edit">Edit</button></span></h3>`
+    + `<div class="plan-grid"><div class="plan-text">${planTextHtml(pl)}</div><div class="plan-levels">${planLevels(a, pl)}</div></div>${scenariosHtml(pl)}`
+    + `${P.showVersions && n > 1 ? `<div class="vers">${oldVersionsHtml(d.versions)}</div>` : ''}</div>`;
+}
+
+function planFormHtml(a, d) {
+  const pl = d.plan || {};
+  const e = d.entry;
+  const prefill = !pl.entry && isNum(a?.avgCost);
+  const known = [];
+  if (isNum(a?.avgCost)) known.push(`average cost ${price(a.avgCost)}`);
+  if (e?.buys) known.push(`${e.buys} buy${e.buys === 1 ? '' : 's'} since ${dateOnly(e.since)}${isNum(e.minBuy) && e.maxBuy > e.minBuy ? `, between ${price(e.minBuy)} and ${price(e.maxBuy)}` : ''}`);
+  const ta = (name, rows, label, hint) => `<div><label for="pf_${name}">${label}${hint ? ` <span class="hint">${hint}</span>` : ''}</label><textarea id="pf_${name}" name="${name}" rows="${rows}" maxlength="4000">${esc(pl[name] || '')}</textarea></div>`;
+  const num = (name, label) => `<div><label for="pf_${name}">${label}</label><input id="pf_${name}" name="${name}" inputmode="decimal" autocomplete="off" value="${esc(isNum(pl[name]) ? plain(pl[name]) : '')}" placeholder="price"></div>`;
+  return `<form class="panel plan plan-form" id="planForm" novalidate autocomplete="off"><h3><span>Plan</span><span class="meta">${d.plan ? `Editing · version ${d.versions.length + 1}` : 'New plan'}</span></h3>
+    <div class="fields two">${ta('thesis', 5, 'Thesis', 'why this, why now')}${ta('invalidation', 5, 'Invalidation', 'what would prove me wrong')}</div>
+    <div class="fields">
+      <div><label for="pf_entry">Entry <span class="hint">${prefill ? 'filled in from your average cost' : 'price or range'}</span></label><input id="pf_entry" name="entry" autocomplete="off" maxlength="80" value="${esc(pl.entry || (prefill ? plain(+a.avgCost.toPrecision(6)) : ''))}" placeholder="price or range"></div>
+      ${num('stop', 'Stop')}${num('target', 'Target')}
+    </div>
+    ${known.length ? `<p class="note tight">From your history: ${known.join(' · ')}.</p>` : ''}
+    <details class="scen-edit"${pl.bear || pl.base || pl.bull ? ' open' : ''}><summary>Scenarios · optional</summary>
+      <div class="fields">${ta('bear', 3, 'Bear')}${ta('base', 3, 'Base')}${ta('bull', 3, 'Bull')}</div></details>
+    <div class="form-err" id="planErr" role="alert"></div>
+    <div class="form-actions"><button type="submit" class="primary">Save plan</button><button type="button" data-plan-act="cancel">Cancel</button>${d.plan ? '<small>Saving replaces the current plan. The old version stays in history.</small>' : ''}</div></form>`;
+}
+
+function renderPlan() {
+  const box = $('#drPlan');
+  if (!box || P.editing) return; // the form is left alone while it is being filled in
+  const a = S.summary?.assets.find((x) => x.group === D.group);
+  if (!plansOn() || !P.data || a?.stable || (!a && !P.data.plan)) { setHTML(box, P.error && plansOn() ? `<div class="callout warn">Could not load the plan: ${esc(P.error)}</div>` : ''); return; }
+  setHTML(box, planCardHtml(a, P.data, D.group));
+}
+function editPlan() {
+  const box = $('#drPlan');
+  if (!box || !P.data) return;
+  P.editing = true;
+  setHTML(box, planFormHtml(S.summary?.assets.find((x) => x.group === D.group), P.data));
+  $('#pf_thesis', box)?.focus({ preventScroll: true });
+  box.scrollIntoView({ block: 'nearest' });
+}
+async function loadPlan() {
+  const group = D.group;
+  P.loadedFor = group;
+  P.data = null;
+  P.error = null;
+  P.editing = false;
+  P.showVersions = false;
+  if (!group) return;
+  try {
+    const d = await api(`/api/plan?group=${encodeURIComponent(group)}`);
+    if (D.group !== group) return;
+    P.data = d;
+  } catch (e) {
+    if (D.group !== group) return;
+    P.error = e.message;
+  }
+  P.stateSeen = S.summary?.assets.find((x) => x.group === group)?.plan;
+  const want = P.wantForm;
+  P.wantForm = false;
+  if (want && P.data && !P.data.plan) editPlan(); else renderPlan();
+}
+/** Called on every drawer refresh: loads the plan once per asset and again when its state changes. */
+function syncPlan() {
+  if (!plansOn()) { P.loadedFor = null; P.data = null; P.editing = false; setHTML($('#drPlan'), ''); return; }
+  const state = S.summary?.assets.find((x) => x.group === D.group)?.plan;
+  if (P.loadedFor !== D.group || (P.data && !P.editing && state !== undefined && state !== P.stateSeen)) loadPlan(); else renderPlan();
+}
+function resetPlan() {
+  P.loadedFor = null;
+  P.data = null;
+  P.editing = false;
+  P.wantForm = false;
+}
+async function planAction(act) {
+  if (act === 'edit') { editPlan(); return; }
+  if (act === 'cancel') { P.editing = false; renderPlan(); return; }
+  if (act === 'versions') { P.showVersions = !P.showVersions; renderPlan(); return; }
+  if (act === 'reviewed') {
+    try { P.data = await api('/api/plan/reviewed', 'POST', { group: D.group }); P.stateSeen = 'ok'; renderPlan(); } catch (e) { toast(`Could not save: ${e.message}`, 'err'); }
+  }
+}
+async function submitPlan(form) {
+  const btn = $('button[type=submit]', form);
+  if (btn.disabled) return;
+  const err = $('#planErr');
+  err.textContent = '';
+  const body = { group: D.group };
+  for (const k of ['thesis', 'invalidation', 'entry', 'stop', 'target', 'bear', 'base', 'bull']) body[k] = form.elements[k].value.trim();
+  for (const k of ['stop', 'target']) {
+    if (body[k] === '') continue;
+    const n = parseNum(body[k]);
+    if (!(n > 0)) { err.textContent = `${k === 'stop' ? 'Stop' : 'Target'}: enter a price, for example 118, or leave it blank.`; form.elements[k].focus(); return; }
+    body[k] = n;
+  }
+  btn.disabled = true;
+  try {
+    P.data = await api('/api/plan', 'POST', body);
+    P.editing = false;
+    P.stateSeen = 'ok';
+    toast('Plan saved');
+    renderPlan();
+  } catch (e) {
+    err.textContent = e.message;
+    btn.disabled = false;
+  }
+}
+
+// Closed trades (a tab on the Assets view)
+async function loadClosed() {
+  if (P.closedLoading) return;
+  P.closedLoading = true;
+  const forCount = S.summary?.plans?.closed;
+  try { const d = await api('/api/closed'); P.closed = d.trades; P.closedMeta = d; P.closedErr = null; } catch (e) { P.closedErr = e.message; }
+  P.closedLoading = false;
+  P.closedFor = forCount;
+  if (S.view === 'assets' && S.summary) assets.update(S.summary);
+}
+const closedKey = (c) => `${c.group}|${c.closedAt}`;
+function closedDetail(c) {
+  const key = esc(closedKey(c));
+  const pl = c.plan;
+  const lv = (label, planned, actual) => `<div class="lv"><span>${label}</span><b>${planned}</b><small>${actual}</small></div>`;
+  const none = '<span class="dim">—</span>';
+  const notes = P.noteEdit === closedKey(c)
+    ? `<form class="note-form" data-key="${key}" novalidate autocomplete="off"><label for="nf_exit">Exit note</label><textarea id="nf_exit" name="exitNote" rows="3" maxlength="4000" placeholder="Why you sold, and whether you followed the plan">${esc(c.exitNote)}</textarea>`
+      + `<label for="nf_lesson">Lesson</label><input id="nf_lesson" name="lesson" maxlength="1000" autocomplete="off" value="${esc(c.lesson)}" placeholder="One line to remember next time">`
+      + '<div class="form-actions"><button type="submit" class="small primary">Save</button><button type="button" class="small" data-note-cancel>Cancel</button></div></form>'
+    : `<label>Exit note</label><p>${c.exitNote ? multiline(c.exitNote) : '<span class="dim">Not written yet.</span>'}</p>${c.lesson ? `<label>Lesson</label><p>${multiline(c.lesson)}</p>` : ''}`
+      + `<button type="button" class="small" data-note-edit="${key}">${c.exitNote || c.lesson ? 'Edit note' : 'Add exit note'}</button>`;
+  return `<div class="closed-plan"><div>${pl ? planTextHtml(pl) : '<label>Plan</label><p class="dim">No plan was written for this trade.</p>'}</div>`
+    + `<div><label>Plan vs what happened</label>${lv('Entry', pl?.entry ? entryText(pl.entry) : none, isNum(c.avgBuy) ? `avg buy ${price(c.avgBuy)}` : '')}${lv('Stop', isNum(pl?.stop) ? price(pl.stop) : none, isNum(c.avgSell) ? `avg sell ${price(c.avgSell)}` : '')}${lv('Target', isNum(pl?.target) ? price(pl.target) : none, '')}`
+    + `${pl ? `<div class="rr"><span>Final plan · version ${c.versions.length} · ${dateOnly(pl.at)}</span></div>` : ''}${pl ? scenariosHtml(pl) : ''}</div>`
+    + `<div>${notes}</div></div>`;
+}
+function renderClosed(s) {
+  if ((P.closed == null || P.closedFor !== s.plans.closed) && !P.closedLoading && !P.closedErr) loadClosed();
+  const q = S.search.trim().toLowerCase();
+  const all = P.closed || [];
+  const list = q ? all.filter((c) => `${c.group} ${c.exitNote} ${c.lesson} ${c.plan?.thesis || ''}`.toLowerCase().includes(q)) : all;
+  const hid = P.closedMeta?.hidden || 0;
+  setHTML($('#asCount'), P.closed ? `${list.length} of ${all.length} closed trade${all.length === 1 ? '' : 's'}${hid ? ` · ${hid} under ${usd(P.closedMeta.minUsd, { dp: 0 })} hidden` : ''}` : '');
+  const COLS = 8;
+  syncRows($('#clTable tbody'), list.length ? list.map((c) => {
+    const open = P.open.has(closedKey(c));
+    const days = Math.max(0, Math.round((c.closedAt - c.openedAt) / 86400));
+    return {
+      key: closedKey(c),
+      cls: `click${open ? ' open' : ''}`,
+      cells: [
+        { h: `<div class="asset"><button type="button" class="chev" aria-label="${open ? 'Collapse' : 'Expand'} trade" aria-expanded="${open}"></button>${avatar(c.group)}<div class="asset-t"><span class="symrow"><span class="sym">${esc(clip(c.group, 16))}</span>${c.plan || c.closedAt < (P.closedMeta?.since || 0) ? '' : planBadge('none')}</span><small class="dk">${c.buys} buy${c.buys === 1 ? '' : 's'} · ${c.sells} sell${c.sells === 1 ? '' : 's'}</small><small class="mo">${dateOnly(c.closedAt)}</small></div></div>` },
+        { h: dateOnly(c.openedAt), c: 'hm' },
+        { h: dateOnly(c.closedAt), c: 'hm' },
+        { h: `<span class="dim">${days} day${days === 1 ? '' : 's'}</span>`, c: 'hm' },
+        { h: money(c.cost), c: 'hm' },
+        { h: money(c.proceeds) },
+        { h: pnlCell(c.realized, c.realizedPct), c: 'two' },
+        { h: c.exitNote ? `<span class="exitnote">${esc(c.exitNote)}</span>` : c.wantsNote ? `<button type="button" class="planbadge review" data-note-edit="${esc(closedKey(c))}">add exit note</button>` : '<span class="dim">—</span>', c: 'hm left' },
+      ],
+      detail: open ? closedDetail(c) : null,
+    };
+  }) : emptyRow(COLS, P.closedErr ? `Could not load closed trades: ${esc(P.closedErr)}` : !P.closed ? '<span class="spin"></span>Loading closed trades…' : q ? 'No closed trades match that filter.' : hid ? `No closed trades of ${usd(P.closedMeta.minUsd, { dp: 0 })} or more. ${hid} smaller one${hid === 1 ? ' is' : 's are'} hidden: the size is set in Settings.` : 'No closed trades yet. A trade appears here once you have sold all of an asset.'));
+  const sum = (k) => list.reduce((t, c) => t + (isNum(c[k]) ? c[k] : 0), 0);
+  const cost = sum('cost');
+  const real = sum('realized');
+  setHTML($('#clFoot'), list.length ? `<td>Total <span class="dim">· ${list.length}</span></td><td class="hm"></td><td class="hm"></td><td class="hm"></td><td class="hm">${money(cost)}</td><td>${money(sum('proceeds'))}</td><td class="two"><span class="${pnlCls(real)}">${usd(real, { sign: true })}</span>${cost > 0 ? `<small class="${pnlCls(real)}">${pct(real / cost)}</small>` : ''}</td><td class="hm"></td>` : '');
+}
+async function saveNote(form) {
+  const c = (P.closed || []).find((x) => closedKey(x) === form.dataset.key);
+  const btn = $('button[type=submit]', form);
+  if (!c || btn.disabled) return;
+  btn.disabled = true;
+  const body = { group: c.group, closedAt: c.closedAt, exitNote: form.elements.exitNote.value.trim(), lesson: form.elements.lesson.value.trim() };
+  try {
+    await api('/api/closed/note', 'POST', body);
+    c.exitNote = body.exitNote;
+    c.lesson = body.lesson;
+    c.wantsNote = c.wantsNote && !body.exitNote;
+    P.noteEdit = null;
+    toast('Note saved');
+    assets.update(S.summary);
+  } catch (e) { toast(`Could not save: ${e.message}`, 'err'); btn.disabled = false; }
+}
 
 // ───────────────────────── positions ─────────────────────────
 async function loadFills() {
@@ -1684,6 +1990,17 @@ function renderKeys(force) {
       <p class="note tight">${st.alchemyKey ? 'A key is saved. ' : '<b class="warn">No key yet.</b> '}Alchemy does Blockscout's job where Blockscout cannot: on Base, which is not on Blockscout's free plan, and on other chains when Blockscout is down or out of credits. While public RPCs are answering it is only called after a balance has moved, plus a slow safety check, to keep the bill low. Enable the networks you want in your Alchemy app and paste its API key here. Stored only in the local database on this machine.</p>
       <div class="form-err" id="alErr" role="alert"></div>
     </form>
+    <form id="planSetForm" class="form" novalidate autocomplete="off">
+      <div class="fields">
+        <div class="span2"><label class="check" for="f_plans"><input type="checkbox" id="f_plans" name="plans" ${st.plans ? 'checked' : ''}> Trade plans</label>
+          <p class="note tight">Keep one plan per asset: thesis, what would prove it wrong, entry, stop and target. Assets without a plan get a small badge, a trade made after the plan asks you to review it, and fully sold positions move to a Closed tab with their realised PnL, final plan and exit note. Switching this off hides it all and keeps what you wrote.</p></div>
+      </div>
+      <div class="fields">
+        <div><label for="f_planMin">Smallest closed trade to show ($)</label><input id="f_planMin" name="plansMinUsd" inputmode="decimal" value="${esc(st.plansMinUsd ?? 100)}"></div>
+        <div class="span2"><p class="note tight">Closed trades with a cost basis under this are left off the Closed tab, which keeps small swaps and test buys out of it. Only trades closed after you switched trade plans on ask for an exit note.</p></div>
+      </div>
+      <div class="form-err" id="planSetErr" role="alert"></div>
+    </form>
     <form id="histForm" class="form" novalidate autocomplete="off">
       <div class="fields">
         <div class="span2"><label>Chart history</label><p class="note tight">Clears the stored portfolio-value snapshots behind the Overview chart, for example after a data glitch. Balances, trades and cost basis are not affected.</p></div>
@@ -1813,6 +2130,19 @@ const settings = {
         } catch (ex) { toast(`Could not save: ${ex.message}`, 'err'); }
         return;
       }
+    });
+    el.addEventListener('change', async (e) => {
+      if (e.target.id === 'f_planMin') {
+        const err = $('#planSetErr');
+        err.textContent = '';
+        const n = parseNum(e.target.value);
+        if (!(n >= 0)) { err.textContent = 'Enter a dollar amount of 0 or more.'; return; }
+        try { await api('/api/settings', 'POST', { plansMinUsd: n }); if (ST.data?.settings) ST.data.settings.plansMinUsd = n; P.closedFor = null; toast(`Closed trades under ${usd(n, { dp: 0 })} are hidden`); } catch (ex) { err.textContent = ex.message; }
+        return;
+      }
+      if (e.target.id !== 'f_plans') return;
+      const on = e.target.checked;
+      try { await api('/api/settings', 'POST', { plans: on }); if (ST.data?.settings) ST.data.settings.plans = on; toast(on ? 'Trade plans switched on' : 'Trade plans switched off'); } catch (ex) { e.target.checked = !on; toast(`Could not save: ${ex.message}`, 'err'); }
     });
     el.addEventListener('submit', async (e) => {
       e.preventDefault();
